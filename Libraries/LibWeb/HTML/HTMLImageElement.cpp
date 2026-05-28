@@ -177,6 +177,17 @@ void HTMLImageElement::initialize(JS::Realm& realm)
     m_document_observer->set_document_became_inactive([this]() {
         m_load_event_delayer.clear();
         m_animation_timer->stop();
+        m_animation_paused_by_visibility = false;
+    });
+    m_document_observer->set_document_visibility_state_observer([this](HTML::VisibilityState visibility_state) {
+        if (visibility_state == HTML::VisibilityState::Hidden) {
+            m_animation_paused_by_visibility = m_animation_timer->is_active();
+            m_animation_timer->stop();
+            return;
+        }
+
+        if (m_animation_paused_by_visibility)
+            start_animation_timer_if_visible();
     });
 }
 
@@ -553,6 +564,11 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> HTMLImageElement::decode() const
             return;
         }
 
+        if (!current_request.shared_resource_request()) {
+            queue_reject_task("Current request changed or was mutated"_utf16);
+            return;
+        }
+
         current_request.add_callbacks(
             // AD-HOC: Enqueue on the batching dispatcher to preserve ordering relative to update_the_image_data's step
             //         16, which also goes through the batching dispatcher. Otherwise decode() can resolve before the
@@ -718,7 +734,7 @@ void HTMLImageElement::update_the_image_data_impl(bool restart_animations, bool 
             m_pending_request = nullptr;
 
             // 4. Set the current request to a new image request whose image data is that of the entry and whose state is completely available.
-            m_current_request = ImageRequest::create(realm(), document().page());
+            m_current_request = ImageRequest::create(document().realm(), document().page());
             m_current_request->set_image_data(entry->image_data);
             m_current_request->set_state(ImageRequest::State::CompletelyAvailable);
             m_current_frame_index = 0;
@@ -745,7 +761,7 @@ void HTMLImageElement::update_the_image_data_impl(bool restart_animations, bool 
                     restart_the_animation();
 
                 // 2. Set the current request's current URL to urlString.
-                m_current_request->set_current_url(realm(), *url_string);
+                m_current_request->set_current_url(document().realm(), *url_string);
 
                 set_needs_style_update(true);
                 set_needs_layout_update_or_repaint_after_image_data_change(*this, DOM::SetNeedsLayoutReason::HTMLImageElementUpdateTheImageData);
@@ -803,7 +819,7 @@ after_step_7:
                 }
 
                 // 1. Change the current request's current URL to the empty string.
-                m_current_request->set_current_url(realm(), String {});
+                m_current_request->set_current_url(document().realm(), String {});
 
                 // 2. If all of the following conditions are true:
                 //    - the element has a src attribute or it uses srcset or picture; and
@@ -844,7 +860,7 @@ after_step_7:
                 }
 
                 // 1. Change the current request's current URL to selected source.
-                m_current_request->set_current_url(realm(), selected_source.value().url);
+                m_current_request->set_current_url(document().realm(), selected_source.value().url);
 
                 // 2. If maybe omit events is not set or previousURL is not equal to selected source, then fire an event named error at the img element.
                 if (!maybe_omit_events || previous_url != selected_source.value().url)
@@ -880,8 +896,8 @@ after_step_7:
         //         multiple image elements (as well as CSS background-images, etc.)
 
         // 17. Set image request to a new image request whose current URL is urlString.
-        auto image_request = ImageRequest::create(realm(), document().page());
-        image_request->set_current_url(realm(), *url_string);
+        auto image_request = ImageRequest::create(document().realm(), document().page());
+        image_request->set_current_url(document().realm(), *url_string);
 
         // 18. If the current request's state is unavailable or broken, then set the current request to image request.
         //     Otherwise, set the pending request to image request.
@@ -929,7 +945,7 @@ after_step_7:
         if (will_lazy_load_element()) {
             // 1. Set the img's lazy load resumption steps to the rest of this algorithm starting with the step labeled fetch the image.
             set_lazy_load_resumption_steps([this, request, image_request]() {
-                image_request->fetch_image(realm(), request);
+                image_request->fetch_image(document().realm(), request);
             });
 
             // 2. Start intersection-observing a lazy loading element for the img element.
@@ -939,7 +955,7 @@ after_step_7:
             return;
         }
 
-        image_request->fetch_image(realm(), request);
+        image_request->fetch_image(document().realm(), request);
     }));
 }
 
@@ -998,7 +1014,7 @@ void HTMLImageElement::add_callbacks_to_image_request(GC::Ref<ImageRequest> imag
                 m_animation_timer->stop();
                 if (image_data->is_animated() && image_data->frame_count() > 1) {
                     m_animation_timer->set_interval(image_data->frame_duration(0));
-                    m_animation_timer->start();
+                    start_animation_timer_if_visible();
                 }
 
                 m_load_event_delayer.clear();
@@ -1110,8 +1126,8 @@ void HTMLImageElement::react_to_changes_in_the_environment()
         key.origin = document().origin();
 
     // 12. ⌛ Let image request be a new image request whose current URL is urlString
-    auto image_request = ImageRequest::create(realm(), document().page());
-    image_request->set_current_url(realm(), *url_string);
+    auto image_request = ImageRequest::create(document().realm(), document().page());
+    image_request->set_current_url(document().realm(), *url_string);
 
     // 13. ⌛ Set the element's pending request to image request.
     m_pending_request = image_request;
@@ -1211,7 +1227,7 @@ void HTMLImageElement::react_to_changes_in_the_environment()
             });
 
         // 5. Let response be the result of fetching request.
-        image_request->fetch_image(realm(), request);
+        image_request->fetch_image(document().realm(), request);
     }
 }
 
@@ -1237,12 +1253,36 @@ void HTMLImageElement::restart_the_animation()
 {
     m_current_frame_index = 0;
 
-    auto image_data = m_current_request->image_data();
-    if (image_data && image_data->frame_count() > 1) {
-        m_animation_timer->start();
+    if (current_request_has_running_animation()) {
+        start_animation_timer_if_visible();
     } else {
         m_animation_timer->stop();
+        m_animation_paused_by_visibility = false;
     }
+}
+
+bool HTMLImageElement::current_request_has_running_animation() const
+{
+    auto image_data = m_current_request->image_data();
+    return image_data && image_data->is_animated() && image_data->frame_count() > 1;
+}
+
+void HTMLImageElement::start_animation_timer_if_visible()
+{
+    if (!current_request_has_running_animation()) {
+        m_animation_timer->stop();
+        m_animation_paused_by_visibility = false;
+        return;
+    }
+
+    if (document().visibility_state_value() == VisibilityState::Hidden) {
+        m_animation_timer->stop();
+        m_animation_paused_by_visibility = true;
+        return;
+    }
+
+    m_animation_paused_by_visibility = false;
+    m_animation_timer->start();
 }
 
 // https://html.spec.whatwg.org/multipage/images.html#update-the-source-set
@@ -1407,6 +1447,12 @@ void HTMLImageElement::set_source_set(SourceSet source_set)
 
 void HTMLImageElement::animate()
 {
+    if (document().visibility_state_value() == VisibilityState::Hidden) {
+        m_animation_timer->stop();
+        m_animation_paused_by_visibility = true;
+        return;
+    }
+
     auto image_data = m_current_request->image_data();
     if (!image_data) {
         return;
@@ -1424,6 +1470,7 @@ void HTMLImageElement::animate()
         ++m_loops_completed;
         if (m_loops_completed > 0 && m_loops_completed == image_data->loop_count()) {
             m_animation_timer->stop();
+            m_animation_paused_by_visibility = false;
         }
     }
 

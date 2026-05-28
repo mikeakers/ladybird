@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <AK/Optional.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Painting/PaintableWithLines.h>
 #include <LibWeb/Painting/ScrollState.h>
@@ -22,6 +23,8 @@ public:
     virtual void reset_for_relayout() override;
 
     void paint_all_phases(DisplayListRecordingContext&);
+    void initialize_async_scrolling_metadata_recording(DisplayListRecordingContext&);
+    void finalize_async_scrolling_metadata_recording(DisplayListRecordingContext&, HTML::Navigable&, Gfx::IntRect viewport_rect);
     void build_stacking_context_tree_if_needed();
 
     void assign_scroll_frames();
@@ -45,12 +48,12 @@ public:
 
     AccumulatedVisualContextTree const& visual_context_tree() const
     {
-        VERIFY(m_visual_context_tree);
+        VERIFY(m_visual_context_tree.has_value());
         return *m_visual_context_tree;
     }
     AccumulatedVisualContextTree& visual_context_tree()
     {
-        VERIFY(m_visual_context_tree);
+        VERIFY(m_visual_context_tree.has_value());
         return *m_visual_context_tree;
     }
 
@@ -67,8 +70,7 @@ private:
 
     Vector<WeakPtr<PaintableBox>> m_paintable_boxes_with_auto_content_visibility;
 
-    RefPtr<AccumulatedVisualContextTree> m_visual_context_tree;
-    VisualContextIndex m_visual_viewport_context_index {};
+    Optional<AccumulatedVisualContextTree> m_visual_context_tree;
 };
 
 template<>

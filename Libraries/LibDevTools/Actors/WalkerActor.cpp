@@ -109,7 +109,7 @@ void WalkerActor::handle_message(Message const& message)
 
     if (message.type == "getLayoutInspector"sv) {
         if (!m_layout_inspector)
-            m_layout_inspector = devtools().register_actor<LayoutInspectorActor>();
+            m_layout_inspector = devtools().register_actor<LayoutInspectorActor>(m_tab, make_weak_ptr<WalkerActor>());
 
         JsonObject actor;
         actor.set("actor"sv, m_layout_inspector->name());
@@ -143,14 +143,74 @@ void WalkerActor::handle_message(Message const& message)
             if (first.is_string() && first.as_string() == "rawAccessible"sv
                 && second.is_string() && second.as_string() == "DOMNode"sv) {
 
-                auto maybe_accessibility_actor = devtools().actor_registry().find(actor_id.value());
-                if (maybe_accessibility_actor == devtools().actor_registry().end()) {
+                auto maybe_actor = devtools().actor_registry().find(actor_id.value());
+                if (maybe_actor == devtools().actor_registry().end()) {
                     send_unknown_actor_error(message, actor_id.value());
                     return;
                 }
 
-                auto accessibility_actor = as<AccessibilityNodeActor>(maybe_accessibility_actor->value.ptr());
+                auto accessibility_actor = as<AccessibilityNodeActor>(maybe_actor->value.ptr());
                 if (auto node_actor_name = m_dom_node_id_to_actor_map.get(accessibility_actor->node_identifier().id); node_actor_name.has_value()) {
+                    auto dom_node = dom_node_for(this, node_actor_name.value());
+                    if (!dom_node.has_value()) {
+                        send_unknown_actor_error(message, node_actor_name.value());
+                        return;
+                    }
+
+                    JsonObject node;
+                    node.set("node"sv, serialize_node(dom_node->node));
+                    node.set("newParents"sv, JsonArray {});
+
+                    response.set("node"sv, move(node));
+                    send_response(message, move(response));
+                    return;
+                }
+            }
+        }
+
+        // Firefox asks for ["containerEl"] on layout actors when the form did not include a containerNodeActorID.
+        if (path->size() == 1 && path->at(0).is_string() && path->at(0).as_string() == "containerEl"sv) {
+            auto maybe_actor = devtools().actor_registry().find(actor_id.value());
+            if (maybe_actor == devtools().actor_registry().end()) {
+                send_unknown_actor_error(message, actor_id.value());
+                return;
+            }
+
+            Optional<Web::UniqueNodeID> container_node_id;
+            if (auto* grid_actor = as_if<GridActor>(maybe_actor->value.ptr()))
+                container_node_id = grid_actor->container_node_id();
+            else if (auto* flexbox_actor = as_if<FlexboxActor>(maybe_actor->value.ptr()))
+                container_node_id = flexbox_actor->container_node_id();
+
+            if (container_node_id.has_value()) {
+                if (auto node_actor_name = m_dom_node_id_to_actor_map.get(*container_node_id); node_actor_name.has_value()) {
+                    auto dom_node = dom_node_for(this, node_actor_name.value());
+                    if (!dom_node.has_value()) {
+                        send_unknown_actor_error(message, node_actor_name.value());
+                        return;
+                    }
+
+                    JsonObject node;
+                    node.set("node"sv, serialize_node(dom_node->node));
+                    node.set("newParents"sv, JsonArray {});
+
+                    response.set("node"sv, move(node));
+                    send_response(message, move(response));
+                    return;
+                }
+            }
+        }
+
+        // Firefox asks for ["element"] on a FlexItemActor when the form did not include a nodeActorID.
+        if (path->size() == 1 && path->at(0).is_string() && path->at(0).as_string() == "element"sv) {
+            auto maybe_actor = devtools().actor_registry().find(actor_id.value());
+            if (maybe_actor == devtools().actor_registry().end()) {
+                send_unknown_actor_error(message, actor_id.value());
+                return;
+            }
+
+            if (auto* flex_item_actor = as_if<FlexItemActor>(maybe_actor->value.ptr())) {
+                if (auto node_actor_name = m_dom_node_id_to_actor_map.get(flex_item_actor->node_id()); node_actor_name.has_value()) {
                     auto dom_node = dom_node_for(this, node_actor_name.value());
                     if (!dom_node.has_value()) {
                         send_unknown_actor_error(message, node_actor_name.value());
@@ -177,6 +237,26 @@ void WalkerActor::handle_message(Message const& message)
 
     if (message.type == "getOffsetParent"sv) {
         response.set("node"sv, JsonValue {});
+        send_response(message, move(response));
+        return;
+    }
+
+    if (message.type == "getParentGridNode"sv) {
+        auto node = get_required_parameter<String>(message, "node"sv);
+        if (!node.has_value())
+            return;
+
+        auto dom_node = WalkerActor::dom_node_for(*this, *node);
+        if (!dom_node.has_value()) {
+            send_unknown_actor_error(message, *node);
+            return;
+        }
+
+        JsonValue parent_grid_node;
+        if (auto parent_grid = parent_grid_node_for_node(dom_node->node); parent_grid.has_value())
+            parent_grid_node = serialize_node(parent_grid.value());
+
+        response.set("node"sv, move(parent_grid_node));
         send_response(message, move(response));
         return;
     }
@@ -516,7 +596,7 @@ JsonValue WalkerActor::serialize_node(JsonObject const& node) const
     serialized.set("causesOverflow"sv, false);
     serialized.set("containerType"sv, JsonValue {});
     serialized.set("displayName"sv, name.to_ascii_lowercase());
-    serialized.set("displayType"sv, "block"sv);
+    serialized.set("displayType"sv, node.get_string("display"sv).value_or("block"_string));
     serialized.set("hasEventListeners"sv, false);
     serialized.set("isAfterPseudoElement"sv, is_after_pseudo_element);
     serialized.set("isAnonymous"sv, false);
@@ -574,6 +654,11 @@ Optional<Node> WalkerActor::dom_node(StringView actor)
     auto identifier = NodeIdentifier::for_node(dom_node);
 
     return Node { .node = dom_node, .identifier = move(identifier), .tab = tab.release_nonnull() };
+}
+
+Optional<String> WalkerActor::node_actor_name_for(Web::UniqueNodeID node_id) const
+{
+    return m_dom_node_id_to_actor_map.get(node_id).copy();
 }
 
 Optional<JsonObject const&> WalkerActor::find_node_by_selector(JsonObject const& node, StringView selector)
@@ -645,6 +730,24 @@ Optional<JsonObject const&> WalkerActor::next_sibling_for_node(JsonObject const&
     if (!parent.has_value() || !parent.value())
         return {};
     return sibling_for_node(*parent.value(), node, Direction::Next);
+}
+
+Optional<JsonObject const&> WalkerActor::parent_grid_node_for_node(JsonObject const& node) const
+{
+    auto parent = m_dom_node_to_parent_map.get(&node);
+    while (parent.has_value() && parent.value()) {
+        auto display = parent.value()->get_string("display"sv);
+        if (!display.has_value())
+            return {};
+        if (display->contains("grid"sv))
+            return *parent.value();
+        if (*display != "contents"sv)
+            return {};
+
+        parent = m_dom_node_to_parent_map.get(parent.value());
+    }
+
+    return {};
 }
 
 Optional<JsonObject const&> WalkerActor::remove_node(JsonObject const& node)

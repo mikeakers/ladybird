@@ -286,11 +286,8 @@ Navigable::Navigable(
     all_navigables().set(*this);
 
     if (!m_is_svg_page && page->has_compositor_host()) {
-        Optional<u64> page_id;
-        if (page_presentation_registration == Compositor::PagePresentationRegistration::Yes)
-            page_id = page->client().id();
         auto context_id = page->client().allocate_compositor_context_id(page_presentation_registration);
-        m_compositor_context = page->compositor_host().create_context(context_id, page_id, page_presentation_registration);
+        m_compositor_context = page->compositor_host().create_context(context_id);
     }
 }
 
@@ -2935,14 +2932,15 @@ void Navigable::set_viewport_size(CSSPixelSize size, InvalidateDisplayList inval
     if (has_compositor_context()) {
         compositor_context().viewport_size_updated(
             page().css_to_device_rect(viewport_rect()).size().to_type<int>(),
-            is_top_level_traversable(),
             Compositor::WindowResizingInProgress::Yes);
         m_pending_set_browser_zoom_request = false;
     }
 
     if (auto document = active_document()) {
-        // NOTE: Resizing the viewport changes the reference value for viewport-relative CSS lengths.
-        document->invalidate_style(DOM::StyleInvalidationReason::NavigableSetViewportSize);
+        if (invalidate_display_list == InvalidateDisplayList::Yes)
+            document->invalidate_style(DOM::StyleInvalidationReason::NavigableSetViewportSize);
+        else
+            document->invalidate_style_for_viewport_change();
         document->set_needs_media_query_evaluation();
         document->set_needs_layout_update(DOM::SetNeedsLayoutReason::NavigableSetViewportSize);
     }
@@ -3115,13 +3113,8 @@ void Navigable::adopt_pending_async_scroll_offsets()
     if (!page().async_scrolling_enabled() || !has_compositor_context())
         return;
 
-    // The compositor thread may have already presented newer scroll offsets. Adopt the latest ones before running
+    // The compositor process may have already presented newer scroll offsets. Adopt the latest ones before running
     // rendering-update observers so they see the same scroll positions as the user.
-    if (compositor_context().should_defer_async_scroll_offset_adoption()) {
-        dbgln_if(COMPOSITOR_DEBUG, "[Compositor] Main thread deferred async scroll offset adoption");
-        return;
-    }
-
     auto async_scroll_updates = compositor_context().take_pending_async_scroll_updates();
     if (async_scroll_updates.scroll_offsets.is_empty() && async_scroll_updates.completed_operation_ids.is_empty())
         return;
@@ -3248,25 +3241,32 @@ bool Navigable::is_focused() const
 
 static String visible_text_in_range(DOM::Range const& range)
 {
-    // NOTE: This is an adaption of Range stringification, but we skip over DOM nodes that don't have a corresponding layout node.
+    // NOTE: This is an adaption of Range stringification — but we skip over DOM nodes that don't have a corresponding
+    //       layout node, and over nodes whose used value of user-select is 'none'. The latter implements
+    //       https://drafts.csswg.org/css-ui/#valdef-user-select-none — applied at the clipboard-extraction boundary.
     StringBuilder builder;
 
+    auto is_user_select_none = [](DOM::Node const& node) {
+        auto const* layout = node.layout_node();
+        return layout && layout->user_select_used_value() == CSS::UserSelect::None;
+    };
+
     if (range.start_container() == range.end_container() && is<DOM::Text>(*range.start_container())) {
-        if (!range.start_container()->layout_node())
+        if (!range.start_container()->layout_node() || is_user_select_none(*range.start_container()))
             return String {};
         return static_cast<DOM::Text const&>(*range.start_container()).data().substring_view(range.start_offset(), range.end_offset() - range.start_offset()).to_utf8_but_should_be_ported_to_utf16();
     }
 
-    if (is<DOM::Text>(*range.start_container()) && range.start_container()->layout_node())
+    if (is<DOM::Text>(*range.start_container()) && range.start_container()->layout_node() && !is_user_select_none(*range.start_container()))
         builder.append(static_cast<DOM::Text const&>(*range.start_container()).data().substring_view(range.start_offset()));
 
     range.for_each_contained([&](GC::Ref<DOM::Node> node) {
-        if (is<DOM::Text>(*node) && node->layout_node())
+        if (is<DOM::Text>(*node) && node->layout_node() && !is_user_select_none(*node))
             builder.append(static_cast<DOM::Text const&>(*node).data());
         return IterationDecision::Continue;
     });
 
-    if (is<DOM::Text>(*range.end_container()) && range.end_container()->layout_node())
+    if (is<DOM::Text>(*range.end_container()) && range.end_container()->layout_node() && !is_user_select_none(*range.end_container()))
         builder.append(static_cast<DOM::Text const&>(*range.end_container()).data().substring_view(0, range.end_offset()));
 
     return MUST(builder.to_string());
@@ -3409,6 +3409,32 @@ void Navigable::destroy_compositor_context()
     m_compositor_context.clear();
 }
 
+void Navigable::repaint_after_compositor_process_reconnect()
+{
+    resolve_all_pending_async_scroll_operations();
+
+    if (has_compositor_context()) {
+        if (auto parent = this->parent();
+            parent && parent->has_compositor_context() && has_compositor_surface_id()) {
+            compositor_context().set_presentation_mode(Compositor::PublishToCompositorSurface {
+                .target_context_id = parent->compositor_context().id(),
+                .surface_id = *m_compositor_surface_id,
+            });
+        }
+        compositor_context().viewport_size_updated(
+            page().css_to_device_rect(viewport_rect()).size().to_type<int>(),
+            Compositor::WindowResizingInProgress::No);
+
+        m_needs_repaint = true;
+        m_needs_to_record_display_list = true;
+        m_compositor_display_list_paint_config.clear();
+        m_compositor_display_list_resources = {};
+    }
+
+    for (auto const& child_navigable : child_navigables())
+        child_navigable->repaint_after_compositor_process_reconnect();
+}
+
 void Navigable::set_should_show_line_box_borders(bool value)
 {
     m_should_show_line_box_borders = value;
@@ -3431,19 +3457,23 @@ bool Navigable::record_display_list_and_scroll_state(PaintConfig paint_config)
     adopt_pending_async_scroll_offsets();
 
     auto should_record_display_list = m_needs_to_record_display_list
-        || !m_rendering_thread_display_list_paint_config.has_value()
-        || !(m_rendering_thread_display_list_paint_config.value() == paint_config);
+        || !m_compositor_display_list_paint_config.has_value()
+        || !(m_compositor_display_list_paint_config.value() == paint_config);
 
     RefPtr<Painting::DisplayList> display_list;
     Painting::DisplayListResourceSet display_list_resources;
     Painting::DisplayListResourceTransaction resource_transaction;
+    Optional<Painting::AccumulatedVisualContextTree> visual_context_tree;
     if (should_record_display_list) {
         display_list = document->record_display_list(paint_config, m_display_list_resource_storage);
         if (!display_list)
             return false;
+        auto recorded_document_paintable = document->paintable();
+        VERIFY(recorded_document_paintable);
+        visual_context_tree = recorded_document_paintable->visual_context_tree();
         display_list_resources = m_display_list_resource_storage.collect_referenced_resources(*display_list);
         resource_transaction = m_display_list_resource_storage.create_transaction(
-            m_rendering_thread_display_list_resources,
+            m_compositor_display_list_resources,
             display_list_resources);
     }
 
@@ -3453,11 +3483,11 @@ bool Navigable::record_display_list_and_scroll_state(PaintConfig paint_config)
 
     Painting::ScrollStateSnapshot scroll_state_snapshot { document_paintable->scroll_state_snapshot() };
     if (should_record_display_list) {
-        compositor_context().update_display_list(*display_list, move(resource_transaction), move(scroll_state_snapshot));
+        compositor_context().update_display_list(*display_list, visual_context_tree.release_value(), move(resource_transaction), move(scroll_state_snapshot));
         m_display_list_resource_storage.retain_only(display_list_resources);
-        m_rendering_thread_display_list_resources = move(display_list_resources);
+        m_compositor_display_list_resources = move(display_list_resources);
         m_needs_to_record_display_list = false;
-        m_rendering_thread_display_list_paint_config = paint_config;
+        m_compositor_display_list_paint_config = paint_config;
     } else {
         compositor_context().update_scroll_state(move(scroll_state_snapshot));
     }

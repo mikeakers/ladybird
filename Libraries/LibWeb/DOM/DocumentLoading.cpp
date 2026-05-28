@@ -64,8 +64,11 @@ bool build_xml_document(DOM::Document& document, ByteBuffer const& data, Optiona
     if (content_encoding.has_value())
         decoder = TextCodec::decoder_for(*content_encoding);
     if (!decoder.has_value()) {
-        auto encoding = HTML::run_encoding_sniffing_algorithm(document, data);
-        decoder = TextCodec::decoder_for(encoding);
+        // https://www.w3.org/TR/xml/#charencoding
+        // [...] it is a fatal error [...] for an entity which begins with neither a Byte Order Mark nor an encoding
+        // declaration to use an encoding other than UTF-8.
+        auto bom_encoding = HTML::run_bom_sniff(data);
+        decoder = TextCodec::decoder_for(bom_encoding.value_or("UTF-8"));
     }
     VERIFY(decoder.has_value());
     // Well-formed XML documents contain only properly encoded characters
@@ -94,6 +97,8 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_html_document(HTML::Navi
     if (document->url_string() == "about:blank"_string
         && navigation_params.response->body()->length().value_or(0) == 0) {
         TRY(document->populate_with_html_head_and_body());
+        if (navigation_params.navigable && navigation_params.navigable->is_top_level_traversable())
+            document->set_supported_color_schemes({ "light"_string, "dark"_string });
         HTML::HTMLParser::the_end(document);
     }
 
@@ -184,8 +189,11 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_xml_document(HTML::Navig
         if (content_encoding.has_value())
             decoder = TextCodec::decoder_for(*content_encoding);
         if (!decoder.has_value()) {
-            auto encoding = HTML::run_encoding_sniffing_algorithm(document, data, mime);
-            decoder = TextCodec::decoder_for(encoding);
+            // https://www.w3.org/TR/xml/#charencoding
+            // [...] it is a fatal error [...] for an entity which begins with neither a Byte Order Mark nor an encoding
+            // declaration to use an encoding other than UTF-8.
+            auto bom_encoding = HTML::run_bom_sniff(data);
+            decoder = TextCodec::decoder_for(bom_encoding.value_or("UTF-8"));
         }
         VERIFY(decoder.has_value());
         // Well-formed XML documents contain only properly encoded characters

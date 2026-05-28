@@ -110,6 +110,7 @@
 #include <LibWeb/Layout/ListItemBox.h>
 #include <LibWeb/Layout/TreeBuilder.h>
 #include <LibWeb/Layout/Viewport.h>
+#include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/MathML/MathMLElement.h>
 #include <LibWeb/MathML/TagNames.h>
 #include <LibWeb/Namespace.h>
@@ -132,6 +133,20 @@
 namespace Web::DOM {
 
 GC_DEFINE_ALLOCATOR(Element);
+
+static void invalidate_content_blocker_style_if_needed(Element& element)
+{
+    if (!element.is_connected())
+        return;
+    if (!ContentBlocker::the().filtering_enabled() || !ContentBlocker::the().has_cosmetic_rules())
+        return;
+
+    auto const& id = element.id();
+    if (!element.document().content_blocker_style_sheet_may_need_refresh_for_class_or_id(id.has_value() ? &id.value() : nullptr, element.class_names()))
+        return;
+
+    element.document().page().invalidate_user_style();
+}
 
 Element::Element(Document& document, DOM::QualifiedName qualified_name)
     : ParentNode(document, NodeType::ELEMENT_NODE)
@@ -386,7 +401,7 @@ GC::Ptr<Attr> Element::get_attribute_node_ns(Optional<FlyString> const& namespac
 }
 
 // https://dom.spec.whatwg.org/#dom-element-setattribute
-WebIDL::ExceptionOr<void> Element::set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Root<TrustedTypes::TrustedHTML>, GC::Root<TrustedTypes::TrustedScript>, GC::Root<TrustedTypes::TrustedScriptURL>, Utf16String> const& value)
+WebIDL::ExceptionOr<void> Element::set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value)
 {
     // 1. If qualifiedName is not a valid attribute local name, then throw an "InvalidCharacterError" DOMException.
     if (!is_valid_attribute_local_name(qualified_name))
@@ -421,12 +436,12 @@ WebIDL::ExceptionOr<void> Element::set_attribute_for_bindings(FlyString qualifie
 }
 
 // https://dom.spec.whatwg.org/#dom-element-setattribute
-WebIDL::ExceptionOr<void> Element::set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Root<TrustedTypes::TrustedHTML>, GC::Root<TrustedTypes::TrustedScript>, GC::Root<TrustedTypes::TrustedScriptURL>, String> const& value)
+WebIDL::ExceptionOr<void> Element::set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, String> const& value)
 {
     return set_attribute_for_bindings(move(qualified_name),
         value.visit(
-            [](auto const& trusted_type) -> Variant<GC::Root<TrustedTypes::TrustedHTML>, GC::Root<TrustedTypes::TrustedScript>, GC::Root<TrustedTypes::TrustedScriptURL>, Utf16String> { return trusted_type; },
-            [](String const& string) -> Variant<GC::Root<TrustedTypes::TrustedHTML>, GC::Root<TrustedTypes::TrustedScript>, GC::Root<TrustedTypes::TrustedScriptURL>, Utf16String> { return Utf16String::from_utf8(string); }));
+            [](auto const& trusted_type) -> Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> { return trusted_type; },
+            [](String const& string) -> Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> { return Utf16String::from_utf8(string); }));
 }
 
 // https://dom.spec.whatwg.org/#valid-namespace-prefix
@@ -540,7 +555,7 @@ WebIDL::ExceptionOr<QualifiedName> validate_and_extract(JS::Realm& realm, Option
 }
 
 // https://dom.spec.whatwg.org/#dom-element-setattributens
-WebIDL::ExceptionOr<void> Element::set_attribute_ns_for_bindings(Optional<FlyString> const& namespace_, FlyString const& qualified_name, Variant<GC::Root<TrustedTypes::TrustedHTML>, GC::Root<TrustedTypes::TrustedScript>, GC::Root<TrustedTypes::TrustedScriptURL>, Utf16String> const& value)
+WebIDL::ExceptionOr<void> Element::set_attribute_ns_for_bindings(Optional<FlyString> const& namespace_, FlyString const& qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value)
 {
     // 1. Let (namespace, prefix, localName) be the result of validating and extracting namespace and qualifiedName given "attribute".
     auto extracted_qualified_name = TRY(validate_and_extract(realm(), namespace_, qualified_name, ValidationContext::Attribute));
@@ -862,6 +877,8 @@ void Element::run_attribute_change_steps(FlyString const& local_name, Optional<S
 
     if (old_value != value) {
         CSS::Invalidation::invalidate_style_after_attribute_change(*this, local_name, old_value, value);
+        if (local_name == HTML::AttributeNames::id || local_name == HTML::AttributeNames::class_)
+            invalidate_content_blocker_style_if_needed(*this);
         document().bump_dom_tree_version();
     }
 }
@@ -925,6 +942,67 @@ static CSS::RequiredInvalidationAfterStyleChange compute_required_invalidation(C
     }
 
     return invalidation;
+}
+
+CSS::RequiredInvalidationAfterStyleChange Element::recompute_pseudo_element_styles(bool& did_change_custom_properties, bool had_list_marker)
+{
+    CSS::RequiredInvalidationAfterStyleChange invalidation;
+
+    auto& style_computer = document().style_computer();
+
+    // Any document change that can cause this element's style to change, could also affect its pseudo-elements.
+    auto recompute_pseudo_element_style = [&](CSS::PseudoElement pseudo_element) {
+        style_computer.push_ancestor(*this);
+
+        auto pseudo_element_style = computed_properties(pseudo_element);
+        auto new_pseudo_element_style = style_computer.compute_pseudo_element_style_if_needed({ *this, pseudo_element }, did_change_custom_properties);
+
+        // TODO: Can we be smarter about invalidation?
+        if (pseudo_element_style && new_pseudo_element_style) {
+            DOM::AbstractElement abstract_element { *this, pseudo_element };
+            invalidation |= compute_required_invalidation(*pseudo_element_style, *new_pseudo_element_style, document().font_computer(), pseudo_element_unsafe_layout_node(pseudo_element), abstract_element);
+        } else if (pseudo_element_style || new_pseudo_element_style) {
+            invalidation = CSS::RequiredInvalidationAfterStyleChange::full();
+        }
+
+        set_computed_properties(pseudo_element, move(new_pseudo_element_style));
+        style_computer.pop_ancestor(*this);
+    };
+
+    recompute_pseudo_element_style(CSS::PseudoElement::Before);
+    recompute_pseudo_element_style(CSS::PseudoElement::After);
+    recompute_pseudo_element_style(CSS::PseudoElement::FirstLetter);
+    recompute_pseudo_element_style(CSS::PseudoElement::Selection);
+    if (m_rendered_in_top_layer)
+        recompute_pseudo_element_style(CSS::PseudoElement::Backdrop);
+    if (had_list_marker || m_computed_properties->display().is_list_item())
+        recompute_pseudo_element_style(CSS::PseudoElement::Marker);
+
+    return invalidation;
+}
+
+void Element::apply_computed_style_to_layout_node_if_needed(CSS::RequiredInvalidationAfterStyleChange const& invalidation)
+{
+    if (invalidation.rebuild_layout_tree || !unsafe_layout_node())
+        return;
+
+    // If we're keeping the layout tree, we can just apply the new style to the existing layout tree.
+    unsafe_layout_node()->apply_style(*m_computed_properties);
+    if (invalidation.repaint)
+        set_needs_repaint();
+
+    // Do the same for pseudo-elements.
+    for_each_synthetic_pseudo_element([&](CSS::PseudoElement pseudo_element_type, SyntheticPseudoElement const& pseudo_element) {
+        auto pseudo_element_style = computed_properties(pseudo_element_type);
+        if (!pseudo_element_style)
+            return;
+
+        if (auto node_with_style = pseudo_element.unsafe_layout_node()) {
+            node_with_style->apply_style(*pseudo_element_style);
+            if (invalidation.repaint && node_with_style->first_paintable())
+                node_with_style->first_paintable()->set_needs_repaint();
+        }
+    });
 }
 
 CSS::RequiredInvalidationAfterStyleChange Element::recompute_style(bool& did_change_custom_properties)
@@ -1005,69 +1083,26 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_style(bool& did_cha
         });
     }
 
-    // Any document change that can cause this element's style to change, could also affect its pseudo-elements.
-    auto recompute_pseudo_element_style = [&](CSS::PseudoElement pseudo_element) {
-        style_computer.push_ancestor(*this);
-
-        auto pseudo_element_style = computed_properties(pseudo_element);
-        auto new_pseudo_element_style = style_computer.compute_pseudo_element_style_if_needed({ *this, pseudo_element }, did_change_custom_properties);
-
-        // TODO: Can we be smarter about invalidation?
-        if (pseudo_element_style && new_pseudo_element_style) {
-            DOM::AbstractElement abstract_element { *this, pseudo_element };
-            invalidation |= compute_required_invalidation(*pseudo_element_style, *new_pseudo_element_style, document().font_computer(), pseudo_element_unsafe_layout_node(pseudo_element), abstract_element);
-        } else if (pseudo_element_style || new_pseudo_element_style) {
-            invalidation = CSS::RequiredInvalidationAfterStyleChange::full();
-        }
-
-        set_computed_properties(pseudo_element, move(new_pseudo_element_style));
-        style_computer.pop_ancestor(*this);
-    };
-
-    recompute_pseudo_element_style(CSS::PseudoElement::Before);
-    recompute_pseudo_element_style(CSS::PseudoElement::After);
-    recompute_pseudo_element_style(CSS::PseudoElement::FirstLetter);
-    recompute_pseudo_element_style(CSS::PseudoElement::Selection);
-    if (m_rendered_in_top_layer)
-        recompute_pseudo_element_style(CSS::PseudoElement::Backdrop);
-    if (had_list_marker || m_computed_properties->display().is_list_item())
-        recompute_pseudo_element_style(CSS::PseudoElement::Marker);
+    invalidation |= recompute_pseudo_element_styles(did_change_custom_properties, had_list_marker);
 
     if (invalidation.is_none()) {
         counters.element_style_noop_recomputations++;
         return invalidation;
     }
 
-    if (!invalidation.rebuild_layout_tree && unsafe_layout_node()) {
-        // If we're keeping the layout tree, we can just apply the new style to the existing layout tree.
-        unsafe_layout_node()->apply_style(*m_computed_properties);
-        if (invalidation.repaint)
-            set_needs_repaint();
-
-        // Do the same for pseudo-elements.
-        for_each_synthetic_pseudo_element([&](CSS::PseudoElement pseudo_element_type, SyntheticPseudoElement const& pseudo_element) {
-            auto pseudo_element_style = computed_properties(pseudo_element_type);
-            if (!pseudo_element_style)
-                return;
-
-            if (auto node_with_style = pseudo_element.unsafe_layout_node()) {
-                node_with_style->apply_style(*pseudo_element_style);
-                if (invalidation.repaint && node_with_style->first_paintable())
-                    node_with_style->first_paintable()->set_needs_repaint();
-            }
-        });
-    }
+    apply_computed_style_to_layout_node_if_needed(invalidation);
 
     return invalidation;
 }
 
-CSS::RequiredInvalidationAfterStyleChange Element::recompute_inherited_style()
+CSS::RequiredInvalidationAfterStyleChange Element::recompute_inherited_style(ScheduleAnimationUpdate schedule_animation_update)
 {
     auto& counters = document().style_invalidation_counters();
     counters.element_inherited_style_recomputations++;
 
     auto computed_properties = this->computed_properties();
     VERIFY(computed_properties);
+    auto had_list_marker = computed_properties->display().is_list_item();
 
     CSS::RequiredInvalidationAfterStyleChange invalidation;
 
@@ -1100,6 +1135,9 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_inherited_style()
         invalidation |= CSS::compute_property_invalidation(property_id, old_value.ptr(), &computed_properties->property(property_id));
     }
 
+    if (schedule_animation_update == ScheduleAnimationUpdate::Yes && has_relevant_animations())
+        document().set_needs_animated_style_update();
+
     if (invalidation.is_none() && property_values_affected_by_inherited_style.is_empty()) {
         counters.element_inherited_style_noop_recomputations++;
         return invalidation;
@@ -1117,17 +1155,15 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_inherited_style()
         invalidation |= CSS::compute_property_invalidation(property_id, old_value.ptr(), &new_value);
     }
 
+    bool did_change_custom_properties = false;
+    invalidation |= recompute_pseudo_element_styles(did_change_custom_properties, had_list_marker);
+
     if (invalidation.is_none()) {
         counters.element_inherited_style_noop_recomputations++;
         return invalidation;
     }
 
-    // NB: unsafe_layout_node() because we're applying recomputed inherited styles during
-    //     style recalculation, before layout has been updated.
-    if (unsafe_layout_node())
-        unsafe_layout_node()->apply_style(*computed_properties);
-    if (invalidation.repaint)
-        set_needs_repaint();
+    apply_computed_style_to_layout_node_if_needed(invalidation);
     return invalidation;
 }
 
@@ -1708,6 +1744,8 @@ void Element::inserted()
             document().element_with_id_was_added({}, *this);
         if (m_name.has_value())
             document().element_with_name_was_added({}, *this);
+        if (m_id.has_value() || !m_classes.is_empty())
+            invalidate_content_blocker_style_if_needed(*this);
     }
 
     play_or_cancel_animations_after_display_property_change();
@@ -1716,6 +1754,11 @@ void Element::inserted()
 void Element::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ancestor, Node& old_root)
 {
     Base::removed_from(is_subtree_root, old_ancestor, old_root);
+
+    // https://html.spec.whatwg.org/multipage/dom.html#render-blocking-mechanism
+    // Whenever a render-blocking element el becomes browsing-context disconnected, unblock rendering on el.
+    if (old_root.is_connected() && document().is_render_blocking_element(*this))
+        unblock_rendering();
 
     if (m_id.has_value() && is<ShadowRoot>(old_root))
         static_cast<ShadowRoot&>(old_root).element_by_id().remove(*m_id, *this);
@@ -1942,6 +1985,8 @@ bool Element::has_synthetic_pseudo_elements() const
 void Element::clear_synthetic_pseudo_element_layout_nodes()
 {
     for_each_synthetic_pseudo_element([&](CSS::PseudoElement, SyntheticPseudoElement& pseudo_element) {
+        if (auto layout_node = pseudo_element.layout_node())
+            layout_node->prepare_subtree_for_detach_from_layout_tree();
         pseudo_element.set_layout_node(nullptr);
     });
 }
@@ -4758,7 +4803,9 @@ Optional<FlyString> Element::document_scoped_view_transition_name()
     // To get the document-scoped view transition name for an Element element:
 
     // 1. Let scopedViewTransitionName be the computed value of view-transition-name for element.
-    auto scoped_view_transition_name = computed_properties()->view_transition_name();
+    auto computed_properties = this->computed_properties();
+    VERIFY(computed_properties);
+    auto scoped_view_transition_name = computed_properties->view_transition_name();
 
     // 2. If scopedViewTransitionName is associated with element’s node document, then return
     //    scopedViewTransitionName.

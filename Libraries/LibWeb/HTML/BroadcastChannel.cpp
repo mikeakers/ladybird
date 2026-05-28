@@ -11,18 +11,19 @@
 #include <LibWeb/Bindings/BroadcastChannel.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
+#include <LibWeb/Bindings/MessageEvent.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/BroadcastChannel.h>
 #include <LibWeb/HTML/BroadcastChannelMessage.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/MessageEvent.h>
+#include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WorkerGlobalScope.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/StorageAPI/StorageKey.h>
-#include <LibWeb/Worker/WebWorkerClient.h>
 
 namespace Web::HTML {
 
@@ -151,14 +152,7 @@ WebIDL::ExceptionOr<void> BroadcastChannel::post_message(JS::Value message)
     // Steps 6-9.
     deliver_message_locally(message_to_send);
 
-    // NB: Other WebContent processes receive this via the browser-process IPC fanout.
-    //     Child worker processes are not part of that routing path, so forward to them directly here.
     Bindings::principal_host_defined_page(realm()).client().page_did_post_broadcast_channel_message(message_to_send);
-
-    WebWorkerClient::for_each_client([&](WebWorkerClient& client) {
-        client.async_broadcast_channel_message(message_to_send);
-        return IterationDecision::Continue;
-    });
 
     return {};
 }
@@ -208,7 +202,7 @@ void BroadcastChannel::deliver_message_locally(BroadcastChannelMessage const& me
             //    origin initialized to sourceOrigin, and then abort these steps.
             auto data_or_error = structured_deserialize(vm, message.serialized_message, target_realm);
             if (data_or_error.is_exception()) {
-                Bindings::MessageEventInit event_init {};
+                Bindings::MessageEventInit event_init;
                 auto event = MessageEvent::create(target_realm, HTML::EventNames::messageerror, event_init, message.source_origin);
                 event->set_is_trusted(true);
                 destination->dispatch_event(event);
@@ -217,7 +211,7 @@ void BroadcastChannel::deliver_message_locally(BroadcastChannelMessage const& me
 
             // 4. Fire an event named message at destination, using MessageEvent, with the data attribute initialized to data and
             //    its origin initialized to sourceOrigin.
-            Bindings::MessageEventInit event_init {};
+            Bindings::MessageEventInit event_init;
             event_init.data = data_or_error.release_value();
             auto event = MessageEvent::create(target_realm, HTML::EventNames::message, event_init, message.source_origin);
             event->set_is_trusted(true);

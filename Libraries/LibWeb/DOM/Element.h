@@ -72,6 +72,11 @@ enum class ProximityToTheViewport : u8 {
     NotDetermined,
 };
 
+enum class ScheduleAnimationUpdate : u8 {
+    No,
+    Yes,
+};
+
 class WEB_API Element
     : public ParentNode
     , public ChildNode<Element>
@@ -129,10 +134,10 @@ public:
     Optional<String> lang() const;
     void invalidate_lang_value();
 
-    WebIDL::ExceptionOr<void> set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Root<TrustedTypes::TrustedHTML>, GC::Root<TrustedTypes::TrustedScript>, GC::Root<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
-    WebIDL::ExceptionOr<void> set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Root<TrustedTypes::TrustedHTML>, GC::Root<TrustedTypes::TrustedScript>, GC::Root<TrustedTypes::TrustedScriptURL>, String> const& value);
+    WebIDL::ExceptionOr<void> set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
+    WebIDL::ExceptionOr<void> set_attribute_for_bindings(FlyString qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, String> const& value);
 
-    WebIDL::ExceptionOr<void> set_attribute_ns_for_bindings(Optional<FlyString> const& namespace_, FlyString const& qualified_name, Variant<GC::Root<TrustedTypes::TrustedHTML>, GC::Root<TrustedTypes::TrustedScript>, GC::Root<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
+    WebIDL::ExceptionOr<void> set_attribute_ns_for_bindings(Optional<FlyString> const& namespace_, FlyString const& qualified_name, Variant<GC::Ref<TrustedTypes::TrustedHTML>, GC::Ref<TrustedTypes::TrustedScript>, GC::Ref<TrustedTypes::TrustedScriptURL>, Utf16String> const& value);
     void set_attribute_value(FlyString const& local_name, String const& value, Optional<FlyString> const& prefix = {}, Optional<FlyString> const& namespace_ = {});
     WebIDL::ExceptionOr<GC::Ptr<Attr>> set_attribute_node_for_bindings(Attr&);
     WebIDL::ExceptionOr<GC::Ptr<Attr>> set_attribute_node_ns_for_bindings(Attr&);
@@ -191,7 +196,7 @@ public:
     void run_attribute_change_steps(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_);
 
     CSS::RequiredInvalidationAfterStyleChange recompute_style(bool& did_change_custom_properties);
-    CSS::RequiredInvalidationAfterStyleChange recompute_inherited_style();
+    CSS::RequiredInvalidationAfterStyleChange recompute_inherited_style(ScheduleAnimationUpdate = ScheduleAnimationUpdate::No);
 
     Optional<CSS::PseudoElement> associated_shadow_host_pseudo_element() const { return m_associated_shadow_host_pseudo_element; }
     void set_associated_shadow_host_pseudo_element(CSS::PseudoElement pseudo_element);
@@ -668,6 +673,8 @@ private:
     FlyString make_html_uppercased_qualified_name() const;
 
     void exit_fullscreen_on_element_removal();
+    CSS::RequiredInvalidationAfterStyleChange recompute_pseudo_element_styles(bool& did_change_custom_properties, bool had_list_marker);
+    void apply_computed_style_to_layout_node_if_needed(CSS::RequiredInvalidationAfterStyleChange const&);
 
     WebIDL::ExceptionOr<GC::Ptr<Node>> insert_adjacent(StringView where, GC::Ref<Node> node);
 

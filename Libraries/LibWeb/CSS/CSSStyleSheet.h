@@ -16,6 +16,7 @@
 #include <LibWeb/CSS/CSSRule.h>
 #include <LibWeb/CSS/CSSRuleList.h>
 #include <LibWeb/CSS/CSSStyleRule.h>
+#include <LibWeb/CSS/SelectorInsights.h>
 #include <LibWeb/CSS/StyleSheet.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/DOM/StyleInvalidationReason.h>
@@ -86,6 +87,7 @@ public:
     void for_each_effective_style_producing_rule(Function<void(CSSRule const&)> const& callback) const;
     // Returns whether the match state of any media queries changed after evaluation.
     bool evaluate_media_queries(DOM::Document const&);
+    bool evaluate_media_queries(DOM::Document const&, Function<void(CSSRule const&)> const& changed_rule_callback);
     void for_each_effective_keyframes_at_rule(Function<void(CSSKeyframesRule const&)> const& callback) const;
     void for_each_effective_counter_style_at_rule(Function<void(CSSCounterStyleRule const&)> const& callback) const;
 
@@ -97,6 +99,7 @@ public:
     virtual void set_disabled(bool) override;
     void for_each_owning_style_scope(Function<void(StyleScope&)> const&) const;
     NonnullRefPtr<StyleCache> shared_single_constructed_sheet_style_cache(StyleScope&);
+    SelectorInsights const& selector_insights() const;
 
     Optional<FlyString> default_namespace() const;
     GC::Ptr<CSSNamespaceRule> default_namespace_rule() const { return m_default_namespace_rule; }
@@ -157,11 +160,12 @@ private:
     bool m_constructed { false };
     bool m_disallow_modification { false };
     Optional<bool> m_did_match;
+    mutable Optional<SelectorInsights> m_selector_insights;
     RefPtr<StyleCache> m_shared_single_constructed_sheet_style_cache;
 
     Vector<Subresource&> m_critical_subresources;
 
-    IGNORE_GC Vector<WeakPtr<ImageStyleValue>> m_pending_image_values;
+    Vector<WeakPtr<ImageStyleValue>> m_pending_image_values;
 };
 
 }

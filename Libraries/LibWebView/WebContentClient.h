@@ -9,9 +9,11 @@
 #include <AK/HashMap.h>
 #include <AK/NonnullRawPtr.h>
 #include <AK/Optional.h>
+#include <AK/RefPtr.h>
 #include <AK/SourceLocation.h>
 #include <AK/String.h>
 #include <AK/StringView.h>
+#include <LibCore/Forward.h>
 #include <LibGfx/Point.h>
 #include <LibGfx/SharedImage.h>
 #include <LibHTTP/Header.h>
@@ -27,6 +29,7 @@
 #include <LibWeb/HTML/FileFilter.h>
 #include <LibWeb/HTML/SelectItem.h>
 #include <LibWeb/HTML/WebViewHints.h>
+#include <LibWeb/HTML/WorkerAgentTypes.h>
 #include <LibWeb/Page/EventResult.h>
 #include <LibWeb/StorageAPI/StorageEndpoint.h>
 #include <LibWebView/Forward.h>
@@ -60,12 +63,18 @@ public:
     Optional<i32> compositor_connection_id(Badge<Application>) const { return m_compositor_connection_id; }
     void register_view(u64 page_id, ViewImplementation&);
     void unregister_view(u64 page_id);
+    void prepare_for_detached_close(u64 page_id);
+    void request_close(u64 page_id);
 
     void web_ui_disconnected(Badge<WebUI>);
 
     bool has_views() const { return !m_views.is_empty(); }
 
     void notify_all_views_of_crash();
+    ErrorOr<void> reconnect_to_compositor_process(Badge<Application>);
+    ErrorOr<void> recreate_compositor_contexts(Badge<Application>);
+    void update_compositor_viewports_after_reconnect(Badge<Application>);
+    void notify_compositor_process_reconnected(Badge<Application>);
     Web::Compositor::CompositorContextId compositor_context_id_for_page(u64 page_id);
     Optional<u64> page_id_for_compositor_context_id(Web::Compositor::CompositorContextId) const;
     bool send_async_scroll_to_compositor(u64 page_id, Gfx::FloatPoint position, Gfx::FloatPoint delta_in_device_pixels);
@@ -80,6 +89,7 @@ public:
 
 private:
     void maybe_record_history_visit_for_current_load(u64 page_id, URL::URL const&, Optional<String> title, StringView reason);
+    void close_server_if_unused();
     bool forget_compositor_context(Web::Compositor::CompositorContextId);
     void destroy_all_compositor_contexts();
 
@@ -109,6 +119,9 @@ private:
     virtual void did_get_source(u64 page_id, URL::URL, URL::URL, String) override;
     virtual void did_inspect_dom_tree(u64 page_id, String) override;
     virtual void did_inspect_dom_node(u64 page_id, DOMNodeProperties) override;
+    virtual void did_inspect_grid_layouts(u64 page_id, String) override;
+    virtual void did_inspect_current_grid(u64 page_id, String) override;
+    virtual void did_inspect_current_flexbox(u64 page_id, String) override;
     virtual void did_inspect_accessibility_tree(u64 page_id, String) override;
     virtual void did_get_hovered_node_id(u64 page_id, Web::UniqueNodeID node_id) override;
     virtual void did_finish_editing_dom_node(u64 page_id, Optional<Web::UniqueNodeID> node_id) override;
@@ -148,6 +161,7 @@ private:
     virtual Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(u64 page_id, Web::HTML::ActivateTab, Web::HTML::WebViewHints, Optional<u64> page_index) override;
     virtual void did_request_activate_tab(u64 page_id) override;
     virtual void did_close_browsing_context(u64 page_id) override;
+    virtual void did_change_needs_beforeunload_check(u64 page_id, bool needs_beforeunload_check) override;
     virtual void did_update_resource_count(u64 page_id, i32 count_waiting) override;
     virtual void did_request_restore_window(u64 page_id) override;
     virtual void did_request_reposition_window(u64 page_id, Gfx::IntPoint) override;
@@ -168,23 +182,35 @@ private:
     virtual void did_set_browser_zoom(u64 page_id, double factor) override;
     virtual void did_find_in_page(u64 page_id, size_t current_match_index, Optional<size_t> total_match_count) override;
     virtual void did_change_theme_color(u64 page_id, Gfx::Color color) override;
+    virtual void did_change_background_color(u64 page_id, Gfx::Color color) override;
     virtual void did_insert_clipboard_entry(u64 page_id, Web::Clipboard::SystemClipboardRepresentation, String presentation_style) override;
     virtual void did_request_clipboard_entries(u64 page_id, u64 request_id) override;
-    virtual void did_request_paste(u64 page_id) override;
+    virtual void did_request_primary_paste(u64 page_id) override;
+    virtual void did_update_primary_selection(u64 page_id, String) override;
     virtual void did_change_audio_play_state(u64 page_id, Web::HTML::AudioPlayState) override;
     virtual void did_update_navigation_buttons_state(u64 page_id, bool back_enabled, bool forward_enabled) override;
-    virtual Messages::WebContentClient::RequestWorkerAgentResponse request_worker_agent(u64 page_id, Web::Bindings::AgentType worker_type) override;
+    virtual Messages::WebContentClient::StartWorkerAgentResponse start_worker_agent(u64 page_id, Web::HTML::WorkerAgentStartRequest request) override;
+    virtual void close_worker_agent(u64 page_id, Web::HTML::WorkerAgentId agent_id, Web::HTML::WorkerAgentOwnerToken owner_token) override;
 
     Optional<ViewImplementation&> view_for_page_id(u64, SourceLocation = SourceLocation::current());
 
+    struct CompositorContextRegistration {
+        Optional<u64> page_id;
+        Web::Compositor::PagePresentationRegistration page_presentation_registration { Web::Compositor::PagePresentationRegistration::No };
+    };
+
+    void remember_compositor_context(Web::Compositor::CompositorContextId, Optional<u64> page_id, Web::Compositor::PagePresentationRegistration);
+
     HashMap<u64, NonnullRawPtr<ViewImplementation>> m_views;
-    HashTable<Web::Compositor::CompositorContextId> m_compositor_context_ids;
+    HashTable<u64> m_detached_pages_pending_close;
+    HashMap<Web::Compositor::CompositorContextId, CompositorContextRegistration> m_compositor_contexts;
     HashMap<u64, Web::Compositor::CompositorContextId> m_page_compositor_context_ids;
     HashMap<Web::Compositor::CompositorContextId, u64> m_page_ids_for_compositor_context_ids;
     HashMap<u64, String> m_history_recorded_urls_for_current_load;
     Optional<i32> m_compositor_connection_id;
 
     ProcessHandle m_process_handle;
+    RefPtr<Core::Timer> m_detached_page_close_timer;
 
     RefPtr<WebUI> m_web_ui;
 

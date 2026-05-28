@@ -565,8 +565,11 @@ void LayoutState::commit(Box& root)
             }
 
             if (node.display().is_grid_inside()) {
-                paintable_box->set_used_values_for_grid_template_columns(used_values.grid_template_columns());
-                paintable_box->set_used_values_for_grid_template_rows(used_values.grid_template_rows());
+                paintable_box->set_grid_layout_data(used_values.take_grid_layout_data());
+            }
+
+            if (node.display().is_flex_inside()) {
+                paintable_box->set_flex_layout_data(used_values.take_flex_layout_data());
             }
         }
     });
@@ -621,10 +624,18 @@ void LayoutState::commit(Box& root)
             auto const& containing_line_box_fragment = used_values.containing_line_box_fragment.value();
             auto const& containing_block = *node.containing_block();
             auto const& containing_block_used_values = get(containing_block);
-            auto const& fragment = containing_block_used_values.line_boxes[containing_line_box_fragment.line_box_index].fragments()[containing_line_box_fragment.fragment_index];
 
             // The fragment has the final offset for the atomic inline, so we just need to copy it from there.
-            offset = fragment.offset();
+            // However, line box post-processing may remove fragments after we record this coordinate.
+            if (containing_line_box_fragment.line_box_index < containing_block_used_values.line_boxes.size()) {
+                auto const& line_box = containing_block_used_values.line_boxes[containing_line_box_fragment.line_box_index];
+                if (containing_line_box_fragment.fragment_index < line_box.fragments().size())
+                    offset = line_box.fragments()[containing_line_box_fragment.fragment_index].offset();
+                else
+                    offset = used_values.offset;
+            } else {
+                offset = used_values.offset;
+            }
         } else {
             // Not an atomic inline, much simpler case.
             offset = used_values.offset;

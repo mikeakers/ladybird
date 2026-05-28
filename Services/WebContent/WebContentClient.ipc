@@ -21,6 +21,7 @@
 #include <LibWeb/HTML/SelectedFile.h>
 #include <LibWeb/HTML/SelectItem.h>
 #include <LibWeb/HTML/WebViewHints.h>
+#include <LibWeb/HTML/WorkerAgentTypes.h>
 #include <LibWeb/Page/EventResult.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWebView/Attribute.h>
@@ -66,6 +67,9 @@ endpoint WebContentClient
 
     did_inspect_dom_tree(u64 page_id, String dom_tree) =|
     did_inspect_dom_node(u64 page_id, WebView::DOMNodeProperties properties) =|
+    did_inspect_grid_layouts(u64 page_id, String grid_layouts) =|
+    did_inspect_current_grid(u64 page_id, String grid_layout) =|
+    did_inspect_current_flexbox(u64 page_id, String flexbox_layout) =|
     did_inspect_accessibility_tree(u64 page_id, String accessibility_tree) =|
     did_get_hovered_node_id(u64 page_id, Web::UniqueNodeID node_id) =|
     did_finish_editing_dom_node(u64 page_id, Optional<Web::UniqueNodeID> node_id) =|
@@ -101,6 +105,7 @@ endpoint WebContentClient
     did_request_new_web_view(u64 page_id, Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints, Optional<u64> page_index) => (String handle)
     did_request_activate_tab(u64 page_id) =|
     did_close_browsing_context(u64 page_id) =|
+    did_change_needs_beforeunload_check(u64 page_id, bool needs_beforeunload_check) =|
     did_request_restore_window(u64 page_id) =|
     did_request_reposition_window(u64 page_id, Gfx::IntPoint position) =|
     did_request_resize_window(u64 page_id, Gfx::IntSize size) =|
@@ -114,10 +119,12 @@ endpoint WebContentClient
     did_request_select_dropdown(u64 page_id, Gfx::IntPoint content_position, i32 minimum_width, Vector<Web::HTML::SelectItem> items) =|
     did_finish_handling_input_event(u64 page_id, Web::EventResult event_result) =|
     did_change_theme_color(u64 page_id, Gfx::Color color) =|
+    did_change_background_color(u64 page_id, Gfx::Color color) =|
 
     did_insert_clipboard_entry(u64 page_id, Web::Clipboard::SystemClipboardRepresentation entry, String presentation_style) =|
     did_request_clipboard_entries(u64 page_id, u64 request_id) =|
-    did_request_paste(u64 page_id) =|
+    did_request_primary_paste(u64 page_id) =|
+    did_update_primary_selection(u64 page_id, String text) =|
 
     did_update_navigation_buttons_state(u64 page_id, bool back_enabled, bool forward_enabled) =|
 
@@ -140,5 +147,6 @@ endpoint WebContentClient
 
     did_find_in_page(u64 page_id, size_t current_match_index, Optional<size_t> total_match_count) =|
 
-    request_worker_agent(u64 page_id, Web::Bindings::AgentType worker_type) => (IPC::TransportHandle handle, IPC::TransportHandle request_server_handle, IPC::TransportHandle image_decoder_handle) // FIXME: Add required attributes to select a SharedWorker Agent
+    start_worker_agent(u64 page_id, Web::HTML::WorkerAgentStartRequest request) => (Web::HTML::WorkerAgentId agent_id)
+    close_worker_agent(u64 page_id, Web::HTML::WorkerAgentId agent_id, Web::HTML::WorkerAgentOwnerToken owner_token) =|
 }

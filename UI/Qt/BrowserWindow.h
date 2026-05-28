@@ -19,6 +19,8 @@
 #include <QTabBar>
 
 class QPropertyAnimation;
+class QToolButton;
+class QWidget;
 
 namespace Ladybird {
 
@@ -86,6 +88,7 @@ public:
     };
 
     BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window = IsPopupWindow::No, Tab* parent_tab = nullptr, Optional<u64> page_index = {});
+    virtual ~BrowserWindow() override;
 
     WebContentView& view() const { return m_current_tab->view(); }
 
@@ -98,13 +101,15 @@ public:
 
     QMenu& hamburger_menu() const { return *m_hamburger_menu; }
 
-    QAction& new_tab_action() const { return *m_new_tab_action; }
     QAction& new_window_action() const { return *m_new_window_action; }
     QAction& find_action() const { return *m_find_in_page_action; }
 
     void rebuild_bookmarks_menu();
     void update_bookmarks_bar_display(bool show_bookmarks_bar);
     void update_reopen_recently_closed_action();
+    void detach_tab_to_new_window(int index, QPoint global_position);
+    void move_tab_to_window(int index, BrowserWindow& target_window, int target_index);
+    void adopt_tab(Tab&, int index);
 
     double refresh_rate() const { return m_refresh_rate; }
 
@@ -135,6 +140,7 @@ public slots:
 
 private:
     virtual bool event(QEvent*) override;
+    virtual bool eventFilter(QObject*, QEvent*) override;
     virtual void resizeEvent(QResizeEvent*) override;
     virtual void changeEvent(QEvent* event) override;
     virtual void moveEvent(QMoveEvent*) override;
@@ -143,8 +149,13 @@ private:
 
     Tab& create_new_tab(Web::HTML::ActivateTab, Tab& parent, Optional<u64> page_index);
     void initialize_tab(Tab*);
+    void uninitialize_tab(Tab*);
 
     void set_current_tab(Tab* tab);
+    Qt::Edges resize_edges_for_position(QPoint const&) const;
+    Optional<Qt::CursorShape> resize_cursor_for_edges(Qt::Edges) const;
+    void update_resize_cursor(QPoint const&);
+    void clear_resize_cursor();
 
     template<typename Callback>
     void for_each_tab(Callback&& callback)
@@ -153,11 +164,17 @@ private:
             callback(*m_tabs_container->tab(i));
     }
 
-    void create_close_button_for_tab(Tab*);
+    void initialize_tab_buttons(Tab*);
+    void create_menu_bar_window_controls();
+    void update_tab_close_button_icons();
+    void update_menu_bar_style();
+    void update_menu_bar_visibility(bool);
+    void update_menu_bar_window_control_icons();
+    void toggle_window_maximized();
+    bool start_window_move();
 
     QIcon icon_for_page_mute_state(Tab&) const;
     QString tool_tip_for_page_mute_state(Tab&) const;
-    QTabBar::ButtonPosition audio_button_position_for_tab(int tab_index) const;
 
     QScreen* m_current_screen { nullptr };
     double m_device_pixel_ratio { 0 };
@@ -168,6 +185,10 @@ private:
 
     QMenu* m_hamburger_menu { nullptr };
     QMenu* m_bookmarks_menu { nullptr };
+    QWidget* m_menu_bar_window_controls { nullptr };
+    QToolButton* m_menu_bar_minimize_window_button { nullptr };
+    QToolButton* m_menu_bar_maximize_window_button { nullptr };
+    QToolButton* m_menu_bar_close_window_button { nullptr };
 
     QAction* m_new_tab_action { nullptr };
     QAction* m_new_window_action { nullptr };
@@ -181,6 +202,7 @@ private:
     // Determine if window should restore to maximized or normal, when exiting fullscreen.
     bool m_restore_to_maximized { false };
     bool m_should_record_closed_window_on_close { true };
+    bool m_resize_cursor_active { false };
 };
 
 }

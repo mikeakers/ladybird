@@ -13,6 +13,7 @@
 #include <LibWeb/CSS/CSSCounterStyleRule.h>
 #include <LibWeb/CSS/CSSImportRule.h>
 #include <LibWeb/CSS/CSSKeyframesRule.h>
+#include <LibWeb/CSS/CSSNestedDeclarations.h>
 #include <LibWeb/CSS/CSSStyleRule.h>
 #include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/FontComputer.h>
@@ -92,7 +93,7 @@ WebIDL::ExceptionOr<GC::Ref<CSSStyleSheet>> CSSStyleSheet::construct_impl(JS::Re
         if (options->media.has<String>()) {
             sheet->set_media(options->media.get<String>());
         } else {
-            sheet->m_media = *options->media.get<GC::Root<MediaList>>();
+            sheet->m_media = *options->media.get<GC::Ref<MediaList>>();
         }
     }
 
@@ -446,7 +447,36 @@ NonnullRefPtr<StyleCache> CSSStyleSheet::shared_single_constructed_sheet_style_c
 
 void CSSStyleSheet::invalidate_shared_style_cache()
 {
+    m_selector_insights = {};
     m_shared_single_constructed_sheet_style_cache = nullptr;
+
+    // Imported rules contribute to their parent sheet's effective rules.
+    if (auto* import_rule = as_if<CSSImportRule>(owner_rule().ptr())) {
+        if (auto* parent_style_sheet = import_rule->parent_style_sheet())
+            parent_style_sheet->invalidate_shared_style_cache();
+    }
+}
+
+SelectorInsights const& CSSStyleSheet::selector_insights() const
+{
+    if (m_selector_insights.has_value())
+        return *m_selector_insights;
+
+    SelectorInsights insights;
+    for_each_effective_style_producing_rule([&](auto const& rule) {
+        SelectorList const& absolutized_selectors = [&]() -> SelectorList const& {
+            if (rule.type() == CSSRule::Type::Style)
+                return static_cast<CSSStyleRule const&>(rule).absolutized_selectors();
+            if (rule.type() == CSSRule::Type::NestedDeclarations)
+                return static_cast<CSSNestedDeclarations const&>(rule).absolutized_selectors();
+            VERIFY_NOT_REACHED();
+        }();
+
+        for (auto const& selector : absolutized_selectors)
+            StyleScope::collect_selector_insights(selector, insights);
+    });
+    m_selector_insights = insights;
+    return *m_selector_insights;
 }
 
 void CSSStyleSheet::invalidate_owners(DOM::StyleInvalidationReason reason, ShadowRootStylesheetEffects const* previous_sheet_effects)
@@ -488,6 +518,11 @@ void CSSStyleSheet::load_pending_image_resources(DOM::Document& document)
 
 bool CSSStyleSheet::evaluate_media_queries(DOM::Document const& document)
 {
+    return evaluate_media_queries(document, [](CSSRule const&) { });
+}
+
+bool CSSStyleSheet::evaluate_media_queries(DOM::Document const& document, Function<void(CSSRule const&)> const& changed_rule_callback)
+{
     bool any_media_queries_changed_match_state = false;
 
     bool now_matches = m_media->evaluate(document);
@@ -495,10 +530,18 @@ bool CSSStyleSheet::evaluate_media_queries(DOM::Document const& document)
     // StyleSheetListAddSheet, AdoptedStyleSheetsList, or invalidate_owners (each of which performs its own
     // invalidation), so we don't need to also report a match-state change just because no prior result was
     // recorded.
-    if (m_did_match.has_value() && m_did_match.value() != now_matches)
+    bool did_match_state_change = m_did_match.has_value() && m_did_match.value() != now_matches;
+    if (did_match_state_change)
         any_media_queries_changed_match_state = true;
-    if (now_matches && m_rules->evaluate_media_queries(document))
+    if (now_matches && m_rules->evaluate_media_queries(document, changed_rule_callback))
         any_media_queries_changed_match_state = true;
+    if (did_match_state_change) {
+        // Imported stylesheets can also have cascade effects through their owning @import rule itself, for example
+        // when a layered import's media gate starts or stops contributing its layer declaration.
+        if (auto rule = owner_rule())
+            changed_rule_callback(*rule);
+        m_rules->for_each_effective_rule(TraversalOrder::Preorder, changed_rule_callback);
+    }
 
     m_did_match = now_matches;
     if (any_media_queries_changed_match_state)

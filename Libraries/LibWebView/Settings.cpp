@@ -58,6 +58,90 @@ static constexpr auto GLOBAL_PRIVACY_CONTROL_KEY = "globalPrivacyControl"sv;
 
 static constexpr auto DNS_SETTINGS_KEY = "dnsSettings"sv;
 
+static constexpr auto CONFIG_VARIABLES_KEY = "configVariables"sv;
+
+static Array<ConfigVariableDefinition, static_cast<size_t>(ConfigVariableID::Count)> const CONFIG_VARIABLE_DEFINITIONS { {
+    {
+        .id = ConfigVariableID::ShowWebContentProcessIDInTabTitle,
+        .name = "debug.process.show_web_content_process_id"sv,
+        .title = "Show WebContent process ID in tab titles"sv,
+        .description = "Append the active WebContent process ID to each tab title and tooltip."sv,
+        .default_value = false,
+        .array_element_type = {},
+    },
+    {
+        .id = ConfigVariableID::ContentBlockerListPaths,
+        .name = "content_blocking.list_paths"sv,
+        .title = "Content blocker list paths"sv,
+        .description = "Load content blocker lists from these filesystem paths on startup, in order."sv,
+        .default_value = JsonArray {},
+        .array_element_type = JsonValue::Type::String,
+    },
+} };
+
+ReadonlySpan<ConfigVariableDefinition const> config_variable_definitions()
+{
+    return CONFIG_VARIABLE_DEFINITIONS;
+}
+
+Optional<ConfigVariableID> config_variable_id_from_name(StringView name)
+{
+    for (auto const& variable : config_variable_definitions()) {
+        if (variable.name == name)
+            return variable.id;
+    }
+
+    return {};
+}
+
+static ConfigVariableDefinition const& config_variable_definition(ConfigVariableID id)
+{
+    return config_variable_definitions()[static_cast<size_t>(id)];
+}
+
+static bool json_value_matches_type(JsonValue const& value, JsonValue::Type type)
+{
+    switch (type) {
+    case JsonValue::Type::Null:
+        return value.is_null();
+    case JsonValue::Type::Bool:
+        return value.is_bool();
+    case JsonValue::Type::Number:
+        return value.is_number();
+    case JsonValue::Type::String:
+        return value.is_string();
+    case JsonValue::Type::Array:
+        return value.is_array();
+    case JsonValue::Type::Object:
+        return value.is_object();
+    }
+
+    VERIFY_NOT_REACHED();
+}
+
+static bool json_array_contains_only_type(JsonArray const& array, JsonValue::Type type)
+{
+    bool contains_only_type = true;
+
+    array.for_each([&](JsonValue const& value) {
+        if (!json_value_matches_type(value, type))
+            contains_only_type = false;
+    });
+
+    return contains_only_type;
+}
+
+static bool config_variable_value_is_valid(ConfigVariableDefinition const& variable, JsonValue const& value)
+{
+    if (!json_value_matches_type(value, variable.default_value.type()))
+        return false;
+
+    if (variable.default_value.is_array() && variable.array_element_type.has_value())
+        return json_array_contains_only_type(value.as_array(), *variable.array_element_type);
+
+    return true;
+}
+
 Settings Settings::create(Badge<Application>)
 {
     // FIXME: Move this to a generic "Ladybird config directory" helper.
@@ -147,6 +231,15 @@ Settings Settings::create(Badge<Application>)
     if (auto dns_settings = settings_json.value().get(DNS_SETTINGS_KEY); dns_settings.has_value())
         settings.m_dns_settings = parse_dns_settings(*dns_settings);
 
+    if (auto config_variables = settings_json.value().get_object(CONFIG_VARIABLES_KEY); config_variables.has_value()) {
+        for (auto const& variable : config_variable_definitions()) {
+            if (auto value = config_variables->get(variable.name); value.has_value()) {
+                if (config_variable_value_is_valid(variable, *value))
+                    settings.m_config_variables[static_cast<size_t>(variable.id)] = *value;
+            }
+        }
+    }
+
     return settings;
 }
 
@@ -157,6 +250,9 @@ Settings::Settings(ByteString settings_path)
     , m_default_zoom_level_factor(INITIAL_ZOOM_LEVEL_FACTOR)
     , m_languages({ DEFAULT_LANGUAGE })
 {
+    for (auto const& variable : config_variable_definitions()) {
+        m_config_variables[static_cast<size_t>(variable.id)] = variable.default_value;
+    }
 }
 
 JsonValue Settings::serialize_json() const
@@ -262,6 +358,11 @@ JsonValue Settings::serialize_json() const
         });
     settings.set(DNS_SETTINGS_KEY, move(dns_settings));
 
+    JsonObject config_variables;
+    for (auto const& variable : config_variable_definitions())
+        config_variables.set(variable.name, m_config_variables[static_cast<size_t>(variable.id)]);
+    settings.set(CONFIG_VARIABLES_KEY, move(config_variables));
+
     return settings;
 }
 
@@ -359,6 +460,17 @@ BrowsingBehavior Settings::parse_browsing_behavior(JsonValue const& settings)
         browsing_behavior.enable_autoscroll = *enable_autoscroll;
     if (auto enable_primary_paste = settings.as_object().get_bool(ENABLE_PRIMARY_PASTE_KEY); enable_primary_paste.has_value())
         browsing_behavior.enable_primary_paste = *enable_primary_paste;
+
+    return browsing_behavior;
+}
+
+BrowsingBehavior Settings::browsing_behavior() const
+{
+    auto browsing_behavior = m_browsing_behavior;
+
+    // Override browsing behaviors depending on what the system supports. We do this here, rather than persisting the
+    // setting override, so that we don't persist unsupported behavior when headless mode is used.
+    browsing_behavior.enable_primary_paste &= Application::the().supports_clipboard_type(Application::ClipboardType::Selection);
 
     return browsing_behavior;
 }
@@ -567,6 +679,65 @@ void Settings::set_dns_settings(DNSSettings const& dns_settings, bool override_b
 
     for (auto& observer : m_observers)
         observer.dns_settings_changed();
+}
+
+JsonValue const& Settings::config_variable(ConfigVariableID id) const
+{
+    return m_config_variables[static_cast<size_t>(id)];
+}
+
+bool Settings::config_variable_as_bool(ConfigVariableID id) const
+{
+    auto const& variable = config_variable_definition(id);
+    VERIFY(variable.default_value.is_bool());
+
+    auto value = config_variable(id).get_bool();
+    VERIFY(value.has_value());
+    return *value;
+}
+
+Vector<String> Settings::config_variable_as_string_array(ConfigVariableID id) const
+{
+    auto const& variable = config_variable_definition(id);
+    VERIFY(variable.default_value.is_array());
+
+    auto const& value = config_variable(id);
+    VERIFY(value.is_array());
+
+    Vector<String> values;
+    values.ensure_capacity(value.as_array().size());
+
+    value.as_array().for_each([&](JsonValue const& entry) {
+        if (entry.is_string())
+            values.append(entry.as_string());
+    });
+
+    return values;
+}
+
+void Settings::set_config_variable(ConfigVariableID id, JsonValue value)
+{
+    auto const& variable = config_variable_definition(id);
+    if (!config_variable_value_is_valid(variable, value))
+        return;
+
+    if (m_config_variables[static_cast<size_t>(id)].equals(value))
+        return;
+
+    m_config_variables[static_cast<size_t>(id)] = move(value);
+    persist_settings();
+
+    for (auto& observer : m_observers)
+        observer.config_variable_changed(id);
+}
+
+void Settings::set_config_variable(StringView name, JsonValue const& value)
+{
+    auto id = config_variable_id_from_name(name);
+    if (!id.has_value())
+        return;
+
+    set_config_variable(*id, value);
 }
 
 void Settings::persist_settings()

@@ -10,6 +10,7 @@
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/DOM/DOMTokenList.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/IDLEventListener.h>
 #include <LibWeb/DOM/ShadowRoot.h>
@@ -18,6 +19,7 @@
 #include <LibWeb/HTML/HTMLMediaElement.h>
 #include <LibWeb/HTML/HTMLVideoElement.h>
 #include <LibWeb/HTML/MediaControls.h>
+#include <LibWeb/HTML/TimeRanges.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/UIEvents/EventNames.h>
 #include <LibWeb/UIEvents/KeyboardEvent.h>
@@ -437,7 +439,10 @@ void MediaControls::toggle_playback()
 {
     if (m_scrubbing_timeline != Scrubbing::No)
         return;
-    m_media_element->toggle_playback();
+    if (m_media_element->paused())
+        m_media_element->play();
+    else
+        m_media_element->pause();
     show_controls();
 }
 
@@ -487,18 +492,58 @@ void MediaControls::update_play_pause_icon()
 void MediaControls::update_timeline()
 {
     VERIFY(m_media_element);
+    VERIFY(m_dom->timeline_track);
     VERIFY(m_dom->timeline_fill);
 
+    auto format_percent = [](double value) {
+        return MUST(String::formatted("{}%", value * 100));
+    };
+
     auto duration = m_media_element->duration();
-    double percentage = 0.0;
+    double progress = 0.0;
     if (!isnan(duration) && duration > 0.0)
-        percentage = (m_media_element->current_time() / duration) * 100.0;
+        progress = (m_media_element->current_time() / duration);
 
-    if (m_last_timeline_percentage == percentage)
-        return;
+    if (m_last_timeline_progress != progress) {
+        MUST(m_dom->timeline_fill->style_for_bindings()->set_property(CSS::PropertyID::Width, format_percent(progress)));
+        m_last_timeline_progress = progress;
+    }
 
-    MUST(m_dom->timeline_fill->style_for_bindings()->set_property(CSS::PropertyID::Width, MUST(String::formatted("{}%", percentage))));
-    m_last_timeline_percentage = percentage;
+    auto buffered = m_media_element->buffered();
+    auto range_count = buffered->length();
+    if (isnan(duration) || duration <= 0.0)
+        range_count = 0;
+
+    while (m_buffered_ranges.size() > range_count) {
+        auto range_div = m_buffered_ranges.take_last();
+        VERIFY(range_div.element);
+        range_div.element->remove();
+    }
+
+    while (m_buffered_ranges.size() < range_count) {
+        auto range = MUST(DOM::create_element(m_media_element->document(), HTML::TagNames::div, Namespace::HTML));
+        static auto s_timeline_buffered_class = "timeline-buffered"_string;
+        MUST(range->class_list()->toggle(s_timeline_buffered_class, true));
+        MUST(range->style_for_bindings()->set_property(CSS::PropertyID::Display, "block"sv));
+        m_dom->timeline_track->insert_before(range, nullptr);
+        m_buffered_ranges.empend(*range);
+    }
+
+    for (size_t i = 0; i < range_count; i++) {
+        auto& range = m_buffered_ranges[i];
+        auto range_start = MUST(buffered->start(i));
+        auto range_duration = MUST(buffered->end(i)) - range_start;
+        auto left = range_start / duration;
+        auto width = range_duration / duration;
+        if (left == range.left && width == range.width)
+            continue;
+        range.left = left;
+        range.width = width;
+
+        auto style = range.element->style_for_bindings();
+        MUST(style->set_property(CSS::PropertyID::Left, format_percent(left)));
+        MUST(style->set_property(CSS::PropertyID::Width, format_percent(width)));
+    }
 }
 
 void MediaControls::request_timeline_update()
@@ -572,13 +617,11 @@ void MediaControls::update_volume_and_mute_indicator()
         m_mute_icon_state = new_volume_icon_state;
     }
 
-    static Vector<String> s_muted_class = { "muted"_string };
     if (muted != m_was_muted) {
         MUST(m_dom->mute_button->class_list()->toggle("muted"_string, muted));
         m_was_muted = muted;
     }
 
-    static Vector<String> s_hidden_class = { "hidden"_string };
     if (has_audio != m_had_audio) {
         MUST(m_dom->volume_area->class_list()->toggle("hidden"_string, !has_audio));
         m_had_audio = has_audio;

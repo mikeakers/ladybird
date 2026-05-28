@@ -104,12 +104,55 @@ static SkM44 to_skia_matrix4x4(Gfx::FloatMatrix4x4 const& matrix)
         matrix[3, 3]);
 }
 
-void DisplayListPlayerSkia::flush()
+void DisplayListPlayerSkia::flush(Gfx::PaintingSurface& surface)
 {
-    if (auto context = surface().skia_backend_context())
-        context->flush_and_submit(&surface().sk_surface());
-    surface().flush();
     m_image_cache.prune();
+    if (auto context = surface.skia_backend_context())
+        context->flush_and_submit(&surface.sk_surface());
+    surface.flush();
+}
+
+void DisplayListPlayerSkia::flush_async(Gfx::PaintingSurface& surface, Function<void()>&& callback)
+{
+    m_image_cache.prune();
+    if (auto context = surface.skia_backend_context())
+        context->flush_and_submit_async(&surface.sk_surface(), move(callback));
+    else
+        callback();
+    surface.flush();
+}
+
+static void paint_scrollbar_into_surface(Gfx::PaintingSurface& surface, PaintScrollBar const& command)
+{
+    auto gutter_rect = to_skia_rect(command.gutter_rect);
+
+    auto thumb_rect = to_skia_rect(command.thumb_rect);
+    auto radius = thumb_rect.width() / 2;
+    auto thumb_rrect = SkRRect::MakeRectXY(thumb_rect, radius, radius);
+
+    auto& canvas = surface.canvas();
+
+    auto gutter_fill_color = command.track_color;
+    SkPaint gutter_fill_paint;
+    gutter_fill_paint.setColor(to_skia_color(gutter_fill_color));
+    canvas.drawRect(gutter_rect, gutter_fill_paint);
+
+    SkPaint thumb_fill_paint;
+    thumb_fill_paint.setColor(to_skia_color(command.thumb_color));
+    canvas.drawRRect(thumb_rrect, thumb_fill_paint);
+
+    auto stroke_color = command.thumb_color.lightened();
+    SkPaint stroke_paint;
+    stroke_paint.setStroke(true);
+    stroke_paint.setStrokeWidth(1);
+    stroke_paint.setAntiAlias(true);
+    stroke_paint.setColor(to_skia_color(stroke_color));
+    canvas.drawRRect(thumb_rrect, stroke_paint);
+}
+
+void DisplayListPlayerSkia::paint_scrollbar(Gfx::PaintingSurface& surface, PaintScrollBar const& command)
+{
+    paint_scrollbar_into_surface(surface, command);
 }
 
 void DisplayListPlayerSkia::draw_glyph_run(DrawGlyphRun const& command)
@@ -582,8 +625,8 @@ SkPaint DisplayListPlayerSkia::paint_style_to_skia_paint(DisplayListPaintStyle c
 
         auto tile_surface = Gfx::PaintingSurface::create_with_size(tile_size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, m_skia_backend_context);
 
-        auto const& tile_display_list = resource_storage().display_list(paint_style.pattern_tile_display_list_id);
-        execute_display_list_into_surface(tile_display_list, *tile_surface);
+        auto const& tile_display_list = resource_storage().display_list_resource(paint_style.pattern_tile_display_list_id);
+        execute_display_list_into_surface(*tile_display_list.display_list, tile_display_list.visual_context_tree, *tile_surface);
 
         auto image = tile_surface->sk_surface().makeImageSnapshot();
 
@@ -818,8 +861,8 @@ void DisplayListPlayerSkia::paint_nested_display_list(PaintNestedDisplayList con
     canvas.translate(command.rect.x(), command.rect.y());
     ScrollStateSnapshot scroll_state_snapshot;
     auto command_bytes = inline_data(command.command_bytes);
-    auto& nested_display_list = resource_storage().display_list(command.display_list_id);
-    execute_nested_display_list(nested_display_list, scroll_state_snapshot, command_bytes);
+    auto const& nested_display_list = resource_storage().display_list_resource(command.display_list_id);
+    execute_nested_display_list(*nested_display_list.display_list, nested_display_list.visual_context_tree, scroll_state_snapshot, command_bytes);
 }
 
 void DisplayListPlayerSkia::compositor_scroll_node(CompositorScrollNode const&)
@@ -848,30 +891,7 @@ void DisplayListPlayerSkia::compositor_blocking_wheel_event_region(CompositorBlo
 
 void DisplayListPlayerSkia::paint_scrollbar(PaintScrollBar const& command)
 {
-    auto gutter_rect = to_skia_rect(command.gutter_rect);
-
-    auto thumb_rect = to_skia_rect(command.thumb_rect);
-    auto radius = thumb_rect.width() / 2;
-    auto thumb_rrect = SkRRect::MakeRectXY(thumb_rect, radius, radius);
-
-    auto& canvas = surface().canvas();
-
-    auto gutter_fill_color = command.track_color;
-    SkPaint gutter_fill_paint;
-    gutter_fill_paint.setColor(to_skia_color(gutter_fill_color));
-    canvas.drawRect(gutter_rect, gutter_fill_paint);
-
-    SkPaint thumb_fill_paint;
-    thumb_fill_paint.setColor(to_skia_color(command.thumb_color));
-    canvas.drawRRect(thumb_rrect, thumb_fill_paint);
-
-    auto stroke_color = command.thumb_color.lightened();
-    SkPaint stroke_paint;
-    stroke_paint.setStroke(true);
-    stroke_paint.setStrokeWidth(1);
-    stroke_paint.setAntiAlias(true);
-    stroke_paint.setColor(to_skia_color(stroke_color));
-    canvas.drawRRect(thumb_rrect, stroke_paint);
+    paint_scrollbar_into_surface(surface(), command);
 }
 
 void DisplayListPlayerSkia::apply_effects(ApplyEffects const& command, Gfx::Filter const* filter)

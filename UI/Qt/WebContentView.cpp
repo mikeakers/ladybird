@@ -34,12 +34,16 @@
 #include <QCursor>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QKeySequence>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPalette>
 #include <QScrollBar>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+#    include <QStyleHints>
+#endif
 #include <QTextEdit>
 #include <QTimer>
 #include <QToolTip>
@@ -62,6 +66,7 @@ WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient
 
     m_device_pixel_ratio = devicePixelRatio();
     m_maximum_frames_per_second = initial_state.maximum_frames_per_second;
+    set_page_background_color_to_system_canvas(is_using_dark_system_theme(*this));
 
     QObject::connect(qGuiApp, &QGuiApplication::screenRemoved, [this](QScreen*) {
         update_screen_rects();
@@ -70,6 +75,15 @@ WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient
     QObject::connect(qGuiApp, &QGuiApplication::screenAdded, [this](QScreen*) {
         update_screen_rects();
     });
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    QObject::connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this, [this] {
+        QTimer::singleShot(0, this, [this] {
+            update_palette();
+            update();
+        });
+    });
+#endif
 
     m_tooltip_hover_timer.setSingleShot(true);
 
@@ -138,7 +152,9 @@ WebContentView::WebContentView(QWidget* window, RefPtr<WebView::WebContentClient
         m_select_dropdown->setMinimumWidth(minimum_width);
 
         auto add_menu_item = [this](Web::HTML::SelectItemOption const& item_option, bool in_option_group) {
-            QAction* action = new QAction(qstring_from_ak_string(in_option_group ? MUST(String::formatted("    {}", item_option.label)) : item_option.label), this);
+            auto label = in_option_group ? qformatted("    {}", item_option.label) : qstring_from_ak_string(item_option.label);
+
+            QAction* action = new QAction(label, this);
             action->setCheckable(true);
             action->setChecked(item_option.selected);
             action->setDisabled(item_option.disabled);
@@ -373,6 +389,34 @@ static Web::UIEvents::KeyCode get_keycode_from_qt_key_event(QKeyEvent const& eve
     return Web::UIEvents::Key_Invalid;
 }
 
+static bool is_browser_reserved_shortcut(QKeyEvent const& event)
+{
+    // Browser chrome shortcuts that manage tabs or windows should not wait for
+    // WebContent to decide whether the page wants to suppress them.
+    if (event.matches(QKeySequence::StandardKey::AddTab)
+        || event.matches(QKeySequence::StandardKey::Close)
+        || event.matches(QKeySequence::StandardKey::New)
+        || event.matches(QKeySequence::StandardKey::Quit))
+        return true;
+
+    auto const modifiers = event.modifiers() & (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier | Qt::MetaModifier);
+    auto const key = event.key();
+
+    if (modifiers == (Qt::ControlModifier | Qt::ShiftModifier) && key == Qt::Key_T)
+        return true;
+
+    if (modifiers == Qt::ControlModifier && (key == Qt::Key_Tab || key == Qt::Key_PageDown))
+        return true;
+
+    if (modifiers == (Qt::ControlModifier | Qt::ShiftModifier) && (key == Qt::Key_Tab || key == Qt::Key_Backtab))
+        return true;
+
+    if (modifiers == Qt::ControlModifier && key == Qt::Key_PageUp)
+        return true;
+
+    return false;
+}
+
 void WebContentView::keyPressEvent(QKeyEvent* event)
 {
     enqueue_native_event(Web::KeyEvent::Type::KeyDown, *event);
@@ -523,17 +567,20 @@ void WebContentView::paintEvent(QPaintEvent*)
         QImage q_image(bitmap->scanline_u8(0), bitmap->width(), bitmap->height(), bitmap->pitch(), QImage::Format_RGB32);
         painter.drawImage(QPoint(0, 0), q_image, QRect(0, 0, bitmap_size.width(), bitmap_size.height()));
 
+        auto background_color = page_background_color();
+        auto fallback_color = QColor(background_color.red(), background_color.green(), background_color.blue());
         if (bitmap_size.width() < width()) {
-            painter.fillRect(bitmap_size.width(), 0, width() - bitmap_size.width(), bitmap->height(), palette().base());
+            painter.fillRect(bitmap_size.width(), 0, width() - bitmap_size.width(), bitmap->height(), fallback_color);
         }
         if (bitmap_size.height() < height()) {
-            painter.fillRect(0, bitmap_size.height(), width(), height() - bitmap_size.height(), palette().base());
+            painter.fillRect(0, bitmap_size.height(), width(), height() - bitmap_size.height(), fallback_color);
         }
 
         return;
     }
 
-    painter.fillRect(rect(), palette().base());
+    auto background_color = page_background_color();
+    painter.fillRect(rect(), QColor(background_color.red(), background_color.green(), background_color.blue()));
 }
 
 void WebContentView::resizeEvent(QResizeEvent* event)
@@ -630,6 +677,7 @@ static Core::AnonymousBuffer make_system_theme_from_qt_palette(QWidget& widget, 
 
 void WebContentView::update_palette(PaletteMode mode)
 {
+    set_page_background_color_to_system_canvas(is_using_dark_system_theme(*this));
     client().async_update_system_theme(m_client_state.page_index, make_system_theme_from_qt_palette(*this, mode));
 }
 
@@ -781,12 +829,21 @@ bool WebContentView::event(QEvent* event)
         return true;
     }
 
-    if (event->type() == QEvent::PaletteChange) {
-        update_palette();
+    if (event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::ThemeChange) {
+        QTimer::singleShot(0, this, [this] {
+            update_palette();
+            update();
+        });
         return QWidget::event(event);
     }
 
     if (event->type() == QEvent::ShortcutOverride) {
+        auto* key_event = static_cast<QKeyEvent*>(event);
+        if (is_browser_reserved_shortcut(*key_event)) {
+            event->ignore();
+            return false;
+        }
+
         event->accept();
         return true;
     }

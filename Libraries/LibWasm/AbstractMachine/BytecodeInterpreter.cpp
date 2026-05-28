@@ -2131,6 +2131,13 @@ HANDLE_INSTRUCTION(return_)
 {
     LOG_INSN;
     configuration.label_stack().shrink(configuration.frame().label_index() + 1, true);
+    // Clear intermediate working values from the value stack, keeping only the top .arity() (the return values) above
+    // the function-level label's recorded stack_height. Without this, residual values pushed before the return are
+    // leaked to the caller’s value stack — and accumulate across nested calls until heap-buffer-overflow.
+    auto const& label = configuration.label_stack().unsafe_last();
+    auto& vs = configuration.value_stack();
+    if (vs.size() > label.stack_height() + label.arity())
+        vs.remove(label.stack_height(), vs.size() - label.stack_height() - label.arity());
     return Outcome::Return;
 }
 
@@ -2144,7 +2151,17 @@ HANDLE_INSTRUCTION(br)
 HANDLE_INSTRUCTION(synthetic_br_nostack)
 {
     LOG_INSN;
-    short_ip.current_ip_value = interpreter.branch_to_label<false>(configuration, instruction->arguments().unsafe_get<Instruction::BranchArgs>().label, short_ip.current_ip_value).value();
+    auto& branch_args = instruction->arguments().unsafe_get<Instruction::BranchArgs>();
+    auto label_idx = branch_args.label.value();
+    auto& label_stack = configuration.label_stack();
+    auto label_pos = label_stack.size() - 1 - label_idx;
+    auto& label = label_stack.data()[label_pos];
+    auto expected = label.stack_height() + label.arity();
+    auto current = configuration.value_stack().size();
+    if (current != expected) [[unlikely]]
+        TAILCALL return InstructionHandler<Instructions::br.value()>::operator()<HasDynamicInsnLimit, Continue, source_address_mix>(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    label_stack.unsafe_shrink(label_pos + 1);
+    short_ip.current_ip_value = label.continuation().value() - 1;
     TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
 }
 
@@ -2158,13 +2175,31 @@ HANDLE_INSTRUCTION(br_if)
     TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
 }
 
+NEVER_INLINE static Outcome synthetic_br_if_nostack_not_taken(HANDLER_PARAMS(DECOMPOSE_PARAMS))
+{
+    short_ip.current_ip_value = interpreter.branch_to_label<true>(configuration, instruction->arguments().unsafe_get<Instruction::BranchArgs>().label, short_ip.current_ip_value).value();
+    TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+}
+
 HANDLE_INSTRUCTION(synthetic_br_if_nostack)
 {
     LOG_INSN;
     LOAD_ADDRESSES();
-    // bounds checked by verifier.
     auto cond = configuration.take_source<source_address_mix>(0, addresses.sources).template to<i32>();
-    short_ip.current_ip_value = interpreter.branch_to_label<false>(configuration, instruction->arguments().unsafe_get<Instruction::BranchArgs>().label, short_ip.current_ip_value, cond != 0).value();
+    if (cond == 0) {
+        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    }
+    auto& branch_args = instruction->arguments().unsafe_get<Instruction::BranchArgs>();
+    auto label_idx = branch_args.label.value();
+    auto& label_stack = configuration.label_stack();
+    auto label_pos = label_stack.size() - 1 - label_idx;
+    auto& label = label_stack.data()[label_pos];
+    auto expected = label.stack_height() + label.arity();
+    auto current = configuration.value_stack().size();
+    if (current != expected) [[unlikely]]
+        return synthetic_br_if_nostack_not_taken(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+    label_stack.unsafe_shrink(label_pos + 1);
+    short_ip.current_ip_value = label.continuation().value() - 1;
     TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
 }
 
@@ -6977,7 +7012,8 @@ CompiledInstructions try_compile_instructions(Expression const& expression, Span
         }
     }
 
-    // Swap out br(.if) with synthetic:br(.if).nostack if !args.has_stack_adjustment.
+    // Swap out br(.if) with the runtime-checked nostack variant if no adjustment is needed.
+    // We still have to check whether that's true in reality as we may have had a polymorphic stack coming in,
     for (size_t i = 0; i < result.dispatches.size(); ++i) {
         auto& dispatch = result.dispatches[i];
         if ((dispatch.instruction->opcode() == Instructions::br || dispatch.instruction->opcode() == Instructions::br_if)

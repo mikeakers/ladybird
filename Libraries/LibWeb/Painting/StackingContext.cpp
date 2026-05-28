@@ -40,6 +40,9 @@ static void paint_node(Paintable const& paintable, DisplayListRecordingContext& 
             context.display_list_recorder().set_accumulated_visual_context(paintable_box->accumulated_visual_context_index());
     }
 
+    if (paintable_box && phase == PaintPhase::Background)
+        paintable_box->record_async_scrolling_metadata(context);
+
     bool const skip_cache = !paintable_box || context.should_show_line_box_borders() || paintable_box->fixed_background_visual_context().has_value();
     if (!skip_cache && paintable_box->has_cached_commands(phase)) {
         context.display_list_recorder().replay_cached_commands(paintable_box->cached_commands(phase));
@@ -366,26 +369,27 @@ void StackingContext::paint(DisplayListRecordingContext& context) const
     Vector<DisplayListRecorder::MaskInfo> masks;
 
     if (mask_image) {
-        auto mask_display_list = DisplayList::create(AccumulatedVisualContextTree::create());
-        DisplayListRecorder display_list_recorder(*mask_display_list, context.display_list_recorder().resource_storage());
+        auto visual_context_tree = AccumulatedVisualContextTree::create();
+        auto mask_display_list = DisplayList::create(visual_context_tree);
+        DisplayListRecorder display_list_recorder(*mask_display_list, visual_context_tree, context.display_list_recorder().resource_storage());
         auto mask_painting_context = context.clone(display_list_recorder);
         auto mask_rect_in_device_pixels = context.enclosing_device_rect(paintable_box().absolute_padding_box_rect());
         mask_image->paint(mask_painting_context, { {}, mask_rect_in_device_pixels.size() }, CSS::ImageRendering::Auto);
-        masks.append({ mask_display_list, mask_rect_in_device_pixels.to_type<int>(), Gfx::MaskKind::Alpha });
+        masks.append({ { *mask_display_list, move(visual_context_tree) }, mask_rect_in_device_pixels.to_type<int>(), Gfx::MaskKind::Alpha });
     }
 
     if (auto mask_area = paintable_box().get_mask_area(); mask_area.has_value()) {
-        if (auto mask_display_list = paintable_box().calculate_mask(context, *mask_area)) {
+        if (auto mask_display_list = paintable_box().calculate_mask(context, *mask_area); mask_display_list.has_value()) {
             auto rect = context.enclosing_device_rect(*mask_area).to_type<int>();
             auto kind = paintable_box().get_mask_type().value_or(Gfx::MaskKind::Alpha);
-            masks.append({ mask_display_list, rect, kind });
+            masks.append({ mask_display_list.release_value(), rect, kind });
         }
     }
 
     if (auto clip_area = paintable_box().get_clip_area(); clip_area.has_value()) {
-        if (auto clip_display_list = paintable_box().calculate_clip(context, *clip_area)) {
+        if (auto clip_display_list = paintable_box().calculate_clip(context, *clip_area); clip_display_list.has_value()) {
             auto rect = context.enclosing_device_rect(*clip_area).to_type<int>();
-            masks.append({ clip_display_list, rect, Gfx::MaskKind::Alpha });
+            masks.append({ clip_display_list.release_value(), rect, Gfx::MaskKind::Alpha });
         }
     }
 

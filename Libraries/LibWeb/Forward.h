@@ -43,6 +43,7 @@ AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(i64, UniqueNodeID, Comparison, Increment, Ca
 
 namespace Web::Painting {
 
+class AccumulatedVisualContextTree;
 class BackingStore;
 class ChromeWidget;
 class DevicePixelConverter;
@@ -485,7 +486,7 @@ struct StyleSheetIdentifier;
 struct TransitionProperties;
 
 // https://drafts.css-houdini.org/css-typed-om-1/#typedefdef-cssnumberish
-using CSSNumberish = Variant<double, GC::Root<CSSNumericValue>>;
+using CSSNumberish = Variant<double, GC::Ref<CSSNumericValue>>;
 using PaintOrderList = Array<PaintOrder, 3>;
 using StyleValueVector = Vector<ValueComparingNonnullRefPtr<StyleValue const>>;
 using StyleValueTuple = Vector<ValueComparingRefPtr<StyleValue const>>;
@@ -850,7 +851,6 @@ class UserActivation;
 class ValidityState;
 class VideoTrack;
 class VideoTrackList;
-class WebWorkerClient;
 class Window;
 class WindowEnvironmentSettingsObject;
 class WindowProxy;

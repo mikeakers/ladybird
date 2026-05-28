@@ -93,10 +93,11 @@ public:
     ErrorOr<NonnullRefPtr<WebContentClient>> launch_web_content_process(ViewImplementation&);
     ErrorOr<void> connect_web_content_to_compositor(WebContentClient&);
     void register_compositor_context(WebContentClient&, Web::Compositor::CompositorContextId, Optional<u64> page_id, Web::Compositor::PagePresentationRegistration);
+    ErrorOr<void> try_register_compositor_context(WebContentClient&, Web::Compositor::CompositorContextId, Optional<u64> page_id, Web::Compositor::PagePresentationRegistration);
     void update_compositor_viewport(Web::Compositor::CompositorContextId, Gfx::IntSize viewport_size, Web::Compositor::WindowResizingInProgress = Web::Compositor::WindowResizingInProgress::No);
     bool send_async_scroll_to_compositor(Web::Compositor::CompositorContextId, Gfx::FloatPoint position, Gfx::FloatPoint delta_in_device_pixels);
     bool handle_mouse_event_in_compositor(Web::Compositor::CompositorContextId, Web::MouseEvent const&);
-    void dispatch_mouse_event_to_web_content(Web::Compositor::CompositorContextId, Web::MouseEvent const&);
+    bool dispatch_mouse_event_to_web_content(Web::Compositor::CompositorContextId, Web::MouseEvent const&);
     void notify_compositor_presented_bitmap_ready_to_paint(Web::Compositor::CompositorContextId, i32 bitmap_id);
 
     virtual Optional<ViewImplementation&> active_web_view() const { return {}; }
@@ -123,7 +124,14 @@ public:
     virtual void display_error_dialog(StringView error_message) const;
 
     // FIXME: We should implement UI-agnostic platform APIs to interact with the system clipboard.
-    virtual Utf16String clipboard_text() const;
+    enum class ClipboardType : u8 {
+        Text,
+        Selection,
+    };
+    virtual bool supports_clipboard_type(ClipboardType) const;
+    virtual Utf16String clipboard_text(ClipboardType = ClipboardType::Text) const;
+    virtual void set_clipboard_text(String, ClipboardType = ClipboardType::Text);
+
     virtual Vector<Web::Clipboard::SystemClipboardRepresentation> clipboard_entries() const;
     virtual void insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresentation);
 
@@ -224,6 +232,8 @@ private:
     ErrorOr<void> launch_services();
     void launch_spare_web_content_process();
     ErrorOr<void> launch_compositor_process();
+    void handle_compositor_process_death();
+    void recover_compositor_process();
     ErrorOr<void> launch_request_server();
     ErrorOr<void> launch_image_decoder_server();
     ErrorOr<void> launch_devtools_server();
@@ -248,8 +258,15 @@ private:
     virtual void stop_listening_for_dom_properties(DevTools::TabDescription const&) const override;
     virtual void inspect_dom_node(DevTools::TabDescription const&, DOMNodeProperties::Type, Web::UniqueNodeID, Optional<Web::CSS::PseudoElement>) const override;
     virtual void clear_inspected_dom_node(DevTools::TabDescription const&) const override;
+    virtual void inspect_grid_layouts(DevTools::TabDescription const&, Web::UniqueNodeID, OnGridLayoutsReceived) const override;
+    virtual void inspect_current_grid(DevTools::TabDescription const&, Web::UniqueNodeID, OnCurrentGridReceived) const override;
+    virtual void inspect_current_flexbox(DevTools::TabDescription const&, Web::UniqueNodeID, bool, OnCurrentFlexboxReceived) const override;
     virtual void highlight_dom_node(DevTools::TabDescription const&, Web::UniqueNodeID, Optional<Web::CSS::PseudoElement>) const override;
     virtual void clear_highlighted_dom_node(DevTools::TabDescription const&) const override;
+    virtual void highlight_flexbox(DevTools::TabDescription const&, Web::UniqueNodeID, JsonValue) const override;
+    virtual void clear_flexbox_highlight(DevTools::TabDescription const&, Web::UniqueNodeID) const override;
+    virtual void highlight_grid(DevTools::TabDescription const&, Web::UniqueNodeID, JsonValue) const override;
+    virtual void clear_grid_highlight(DevTools::TabDescription const&, Web::UniqueNodeID) const override;
     virtual void listen_for_dom_mutations(DevTools::TabDescription const&, OnDOMMutationReceived) const override;
     virtual void stop_listening_for_dom_mutations(DevTools::TabDescription const&) const override;
     virtual void get_dom_node_inner_html(DevTools::TabDescription const&, Web::UniqueNodeID, OnDOMNodeHTMLReceived) const override;
@@ -295,6 +312,13 @@ private:
     RefPtr<Requests::RequestClient> m_request_server_client;
     RefPtr<ImageDecoderClient::Client> m_image_decoder_client;
     RefPtr<CompositorClient> m_compositor_client;
+    size_t m_compositor_restart_count { 0 };
+    enum class CompositorRecoveryState {
+        Idle,
+        Queued,
+        Recovering,
+    };
+    CompositorRecoveryState m_compositor_recovery_state { CompositorRecoveryState::Idle };
 
     RefPtr<WebContentClient> m_spare_web_content_process;
     bool m_has_queued_task_to_launch_spare_web_content_process { false };

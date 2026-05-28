@@ -32,10 +32,7 @@ set(SOURCES
     Clipboard/SystemClipboard.cpp
     Compositor/AsyncScrollTree.cpp
     Compositor/AsyncScrollingState.cpp
-    Compositor/BackingStoreManager.cpp
-    Compositor/CompositorContextState.cpp
     Compositor/CompositorHost.cpp
-    Compositor/CompositorThread.cpp
     Compositor/Types.cpp
     Compression/CompressionStream.cpp
     Compression/DecompressionStream.cpp
@@ -724,6 +721,7 @@ set(SOURCES
     HTML/WorkerDebugConsoleClient.cpp
     HTML/WorkerGlobalScope.cpp
     HTML/WorkerLocation.cpp
+    HTML/WorkerAgentTypes.cpp
     HTML/WorkerNavigator.cpp
     HTML/WorkletGlobalScope.cpp
     HTML/XMLSerializer.cpp
@@ -1187,7 +1185,6 @@ set(SOURCES
     WebXR/XRSessionEvent.cpp
     WebXR/XRSystem.cpp
     WebXR/XRWebGLLayer.cpp
-    Worker/WebWorkerClient.cpp
     XHR/EventNames.cpp
     XHR/FormData.cpp
     XHR/FormDataIterator.cpp
@@ -1254,8 +1251,10 @@ ladybird_lib(LibWeb web EXPLICIT_SYMBOL_EXPORT)
 target_link_libraries(LibWeb PRIVATE LibCore LibCompress LibCrypto LibJS LibHTTP LibGfx LibIPC LibRegex LibSyntax LibTextCodec LibUnicode LibMedia LibWasm LibXML LibIDL LibURL LibTLS LibRequests LibGC LibSync LibThreading skia ${ANGLE_TARGETS} SDL3::SDL3 LibXml2::LibXml2)
 
 import_rust_crate(MANIFEST_PATH Rust/Cargo.toml CRATE_NAME libweb_rust FFI_HEADER RustFFI.h)
-target_link_libraries(LibWeb PRIVATE libweb_rust)
+import_rust_crate(MANIFEST_PATH ContentBlocker/Rust/Cargo.toml CRATE_NAME libweb_content_blocker_rust FFI_HEADER ContentBlockerRustFFI.h)
+target_link_libraries(LibWeb PRIVATE libweb_rust libweb_content_blocker_rust)
 get_target_property(_libweb_rust_lib libweb_rust IMPORTED_LOCATION)
+get_target_property(_libweb_content_blocker_rust_lib libweb_content_blocker_rust IMPORTED_LOCATION)
 set_property(SOURCE HTML/Parser/HTMLTokenizer.cpp APPEND PROPERTY OBJECT_DEPENDS ${_libweb_rust_lib})
 set_property(SOURCE HTML/Parser/HTMLParser.cpp APPEND PROPERTY OBJECT_DEPENDS ${_libweb_rust_lib})
 set_property(SOURCE HTML/Parser/SpeculativeHTMLParser.cpp APPEND PROPERTY OBJECT_DEPENDS ${_libweb_rust_lib})
@@ -1266,6 +1265,7 @@ endif()
 if(NOT BUILD_SHARED_LIBS)
     add_custom_command(TARGET LibWeb POST_BUILD
         COMMAND ${CMAKE_AR} -x $<TARGET_FILE:libweb_rust>
+        COMMAND ${CMAKE_AR} -x $<TARGET_FILE:libweb_content_blocker_rust>
         COMMAND ${CMAKE_AR} -qS $<TARGET_FILE:LibWeb> *.o
         COMMAND ${CMAKE_RANLIB} $<TARGET_FILE:LibWeb>
         COMMAND ${CMAKE_COMMAND} -E remove -f *.o
@@ -1274,12 +1274,14 @@ if(NOT BUILD_SHARED_LIBS)
     )
     file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rust_merge_tmp)
 
-    # POST_BUILD steps don't track inputs, so when libweb_rust.a changes
+    # POST_BUILD steps don't track inputs, so when a Rust archive changes
     # ninja leaves liblagom-web.a alone and the merged archive ends up with
-    # stale Rust objects. Force the C++ FFI bridge file to depend on the
-    # Rust archive: when it changes, RustTokenizer.cpp recompiles, LibWeb
-    # re-archives, and POST_BUILD re-merges the fresh Rust objects.
+    # stale Rust objects. Force the C++ FFI bridge files to depend on the
+    # Rust archives: when they change, LibWeb re-archives, and POST_BUILD
+    # re-merges the fresh Rust objects.
     set_property(SOURCE CSS/Parser/RustTokenizer.cpp APPEND PROPERTY OBJECT_DEPENDS ${_libweb_rust_lib})
+    set_property(SOURCE HTML/Parser/HTMLEncodingDetection.cpp APPEND PROPERTY OBJECT_DEPENDS ${_libweb_rust_lib})
+    set_property(SOURCE Loader/ContentBlocker.cpp APPEND PROPERTY OBJECT_DEPENDS ${_libweb_content_blocker_rust_lib})
 endif()
 
 if (HAS_FONTCONFIG)

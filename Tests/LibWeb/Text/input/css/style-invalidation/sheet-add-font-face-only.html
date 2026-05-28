@@ -1,10 +1,12 @@
 <!DOCTYPE html>
+<meta charset="utf-8">
 <script src="../../include.js"></script>
 <div id="trigger"></div>
 <script>
     function settleAndReset(triggerElement) {
         getComputedStyle(triggerElement).color;
         getComputedStyle(triggerElement).color;
+        internals.updateStyle();
         internals.resetStyleInvalidationCounters();
     }
 

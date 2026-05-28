@@ -642,7 +642,7 @@ void HTMLInputElement::did_select_files(Span<SelectedFile> selected_files, Multi
         Bindings::FilePropertyBag options {};
         options.type = mime_type.essence();
 
-        auto file = MUST(FileAPI::File::create(realm(), { GC::make_root(blob) }, file_name, move(options)));
+        auto file = MUST(FileAPI::File::create(realm(), { { blob } }, file_name, move(options)));
         files->add_file(file);
     }
 
@@ -2083,10 +2083,15 @@ void HTMLInputElement::apply_presentational_hints(Vector<CSS::StyleProperty>& pr
 
     for_each_attribute([&](auto& name, auto& value) {
         if (name == HTML::AttributeNames::align) {
-            if (value.equals_ignoring_ascii_case("center"sv))
-                properties.append({ .property_id = CSS::PropertyID::TextAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Center) });
-            else if (value.equals_ignoring_ascii_case("middle"sv))
-                properties.append({ .property_id = CSS::PropertyID::TextAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Middle) });
+            // https://html.spec.whatwg.org/multipage/rendering.html#attributes-for-embedded-content-and-images
+            // When an embed, iframe, img, or object element, or an input element whose type attribute is in the Image Button state,
+            // has an align attribute whose value is an ASCII case-insensitive match for the string "center" or the string "middle",
+            // the user agent is expected to act as if the element's 'vertical-align' property was set to a value that aligns the
+            // vertical middle of the element with the parent element's baseline.
+            // FIXME: This should use legacy baseline-middle alignment instead of CSS vertical-align: middle,
+            //        as Firefox and Chrome do with engine-specific legacy values.
+            if (value.equals_ignoring_ascii_case("center"sv) || value.equals_ignoring_ascii_case("middle"sv))
+                properties.append({ .property_id = CSS::PropertyID::VerticalAlign, .value = CSS::KeywordStyleValue::create(CSS::Keyword::Middle) });
         } else if (name == HTML::AttributeNames::border) {
             if (auto parsed_value = parse_non_negative_integer(value); parsed_value.has_value()) {
                 auto width_style_value = CSS::LengthStyleValue::create(CSS::Length::make_px(*parsed_value));
@@ -2958,22 +2963,22 @@ JS::Object* HTMLInputElement::value_as_date() const
 }
 
 // https://html.spec.whatwg.org/multipage/input.html#dom-input-valueasdate
-WebIDL::ExceptionOr<void> HTMLInputElement::set_value_as_date(Optional<GC::Root<JS::Object>> const& value)
+WebIDL::ExceptionOr<void> HTMLInputElement::set_value_as_date(GC::Ptr<JS::Object> value)
 {
     // On setting, if the valueAsDate attribute does not apply, as defined for the input element's type attribute's current state, then throw an "InvalidStateError" DOMException;
     if (!value_as_date_applies())
         return WebIDL::InvalidStateError::create(realm(), "valueAsDate: Invalid input type used"_utf16);
 
     // otherwise, if the new value is not null and not a Date object throw a TypeError exception;
-    if (value.has_value() && !is<JS::Date>(**value))
+    if (value && !is<JS::Date>(*value))
         return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "valueAsDate: input is not a Date"sv };
 
     // otherwise if the new value is null or a Date object representing the NaN time value, then set the value of the element to the empty string;
-    if (!value.has_value()) {
+    if (!value) {
         TRY(set_value({}));
         return {};
     }
-    auto& date = static_cast<JS::Date&>(**value);
+    auto& date = static_cast<JS::Date&>(*value);
     if (!isfinite(date.date_value())) {
         TRY(set_value({}));
         return {};

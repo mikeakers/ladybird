@@ -11,6 +11,11 @@ function resetStyleCounters() {
     internals.resetStyleInvalidationCounters();
 }
 
+function flushPendingStyleWork() {
+    internals.updateStyle();
+    resetStyleCounters();
+}
+
 function styleCounterSummary() {
     const counters = internals.getStyleInvalidationCounters();
     return (
@@ -317,6 +322,7 @@ function runCase({
         else printPassWithCounters(testName);
     } finally {
         cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -365,6 +371,7 @@ function runDuplicateDescendantInvalidationRuleCase(scope) {
         printPassWithCounters(`duplicate descendant invalidation rules merge: ${scope}`);
     } finally {
         scoped.cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -386,6 +393,7 @@ function runDuplicateSiblingInvalidationRuleCase(scope) {
         printPassWithCounters(`duplicate sibling invalidation rules merge: ${scope}`);
     } finally {
         scoped.cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -423,6 +431,7 @@ function runBatchedHasMutationCase({
 
     style.remove();
     fixture.remove();
+    flushPendingStyleWork();
 }
 
 function appendHitDescendant(subject) {
@@ -1649,6 +1658,10 @@ const partChildMutationCases = [
         selector: ":empty",
         initial: true,
         after: false,
+        // This is the first case to run in this test. whichever scope runs first triggers some lazy style-system
+        // initialization whose recomputation counters differ depending on non-deterministic state — so the counters
+        // here aren't a stable thing to assert on. childMutationCases sets the same flag on its equivalent first case.
+        omitRecomputeCounters: true,
         mutate: subject => subject.appendChild(makeElement("span")),
     },
     {
@@ -2087,6 +2100,7 @@ function runInheritedLanguageCase(scope, selectorCase, pseudoElement = "") {
         printPassWithCounters(testName);
     } finally {
         cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -2157,6 +2171,7 @@ function runPrecomputedDetachedInsertionCase(selectorCase) {
     } finally {
         style.remove();
         fixture.remove();
+        flushPendingStyleWork();
     }
 }
 
@@ -2418,6 +2433,7 @@ function runInheritedLanguageStressCase(scope, selectorCase, mode) {
         printPassWithCounters(testName);
     } finally {
         cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -2487,6 +2503,7 @@ function runPrecomputedDetachedInsertionStressCase(selectorCase, mode) {
     } finally {
         style.remove();
         fixture.remove();
+        flushPendingStyleWork();
     }
 }
 
@@ -2517,6 +2534,7 @@ function runSlotMoveCase() {
         printPassWithCounters("scope move: slotted shadow-host target moves between slot scopes");
     } finally {
         fixture.remove();
+        flushPendingStyleWork();
     }
 }
 
@@ -2543,5 +2561,6 @@ function runNestedSlotPartCase() {
         printPassWithCounters("combined topology: ancestor shadow exposes part slot with generated pseudo-element");
     } finally {
         fixture.remove();
+        flushPendingStyleWork();
     }
 }

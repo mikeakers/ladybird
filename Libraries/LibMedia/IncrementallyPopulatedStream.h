@@ -39,17 +39,22 @@ public:
     void set_data_request_callback(DataRequestCallback);
 
     void add_chunk_at(u64 offset, ReadonlyBytes);
+    void remove_byte_range(u64 start, u64 end);
     u64 next_chunk_start() const { return m_last_chunk_end; }
 
     void close();
 
+    virtual Vector<ByteRange> available_byte_ranges() const override;
+
     u64 size();
     void set_expected_size(u64);
-    Optional<u64> expected_size() const;
+    virtual Optional<u64> expected_size() const override;
 
     class MEDIA_API Cursor : public MediaStreamCursor {
     public:
         ~Cursor();
+
+        virtual void set_is_blocking(bool) override;
 
         virtual DecoderErrorOr<void> seek(i64 offset, AK::SeekMode mode) override;
         virtual DecoderErrorOr<size_t> read_into(Bytes bytes) override;
@@ -69,6 +74,7 @@ public:
         Cursor(NonnullRefPtr<IncrementallyPopulatedStream> const& stream);
 
         NonnullRefPtr<IncrementallyPopulatedStream> m_stream;
+        bool m_is_blocking { true };
         size_t m_position { 0 };
         bool m_aborted { false };
         Atomic<bool> m_blocked { false };
@@ -106,7 +112,7 @@ private:
     DecoderErrorOr<size_t> read_at(Cursor&, size_t position, Bytes&);
 
     void begin_new_request_while_locked(u64 position);
-    bool check_if_data_is_available_or_begin_request_while_locked(MonotonicTime now, u64 position, u64 length);
+    bool check_if_data_is_available_or_begin_request_while_locked(Cursor&, u64 position, u64 length);
     size_t read_from_chunks_while_locked(u64 position, Bytes& bytes) const;
 
     mutable Sync::Mutex m_mutex;

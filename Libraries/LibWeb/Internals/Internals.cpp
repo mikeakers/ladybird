@@ -19,6 +19,9 @@
 #include <LibWeb/Bindings/Internals.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
+#include <LibWeb/CSS/CSSStyleSheet.h>
+#include <LibWeb/CSS/PreferredColorScheme.h>
+#include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/Compositor/AsyncScrollTree.h>
 #include <LibWeb/Compositor/AsyncScrollingState.h>
 #include <LibWeb/DOM/Document.h>
@@ -348,6 +351,11 @@ void Internals::mouse_move(double x, double y, WebIDL::UnsignedShort modifiers)
     page.handle_mousemove(position, position, 0, modifiers);
 }
 
+void Internals::mouse_leave()
+{
+    this->page().handle_mouseleave();
+}
+
 void Internals::click(double x, double y, WebIDL::UnsignedShort click_count, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers)
 {
     click_and_hold(x, y, click_count, button, modifiers);
@@ -381,11 +389,11 @@ GC::Ref<WebIDL::Promise> Internals::wheel(double x, double y, double delta_x, do
     return promise;
 }
 
-void Internals::pinch(double x, double y, double scale_delta)
+void Internals::pinch(double x, double y, double scale_delta, WebIDL::UnsignedShort modifiers)
 {
     auto& page = this->page();
     auto position = page.css_to_device_point({ x, y });
-    page.handle_pinch_event(position, scale_delta);
+    page.handle_pinch_event(position, modifiers, scale_delta);
 }
 
 String Internals::current_cursor()
@@ -400,6 +408,11 @@ String Internals::current_cursor()
         [](Gfx::ImageCursor const&) {
             return "Image"_string;
         });
+}
+
+String Internals::selected_text_for_clipboard()
+{
+    return page().focused_navigable().selected_text();
 }
 
 WebIDL::ExceptionOr<bool> Internals::dispatch_user_activated_event(DOM::EventTarget& target, DOM::Event& event)
@@ -682,6 +695,7 @@ JS::Object* Internals::get_style_invalidation_counters()
     object->define_direct_property("hasAncestorWalkVisits"_utf16_fly_string, JS::Value(counters.has_ancestor_walk_visits), JS::default_attributes);
     object->define_direct_property("hasAncestorSiblingElementChecks"_utf16_fly_string, JS::Value(counters.has_ancestor_sibling_element_checks), JS::default_attributes);
     object->define_direct_property("hasInvalidationMetadataCandidates"_utf16_fly_string, JS::Value(counters.has_invalidation_metadata_candidates), JS::default_attributes);
+    object->define_direct_property("hasInvalidationRuleCacheBuilds"_utf16_fly_string, JS::Value(counters.has_invalidation_rule_cache_builds), JS::default_attributes);
     object->define_direct_property("hasMatchInvocations"_utf16_fly_string, JS::Value(counters.has_match_invocations), JS::default_attributes);
     object->define_direct_property("hasResultCacheHits"_utf16_fly_string, JS::Value(counters.has_result_cache_hits), JS::default_attributes);
     object->define_direct_property("hasResultCacheMisses"_utf16_fly_string, JS::Value(counters.has_result_cache_misses), JS::default_attributes);
@@ -701,9 +715,46 @@ void Internals::reset_style_invalidation_counters()
     window().associated_document().reset_style_invalidation_counters();
 }
 
+void Internals::update_style()
+{
+    window().associated_document().update_style();
+}
+
+void Internals::set_preferred_color_scheme(StringView color_scheme)
+{
+    auto preferred_color_scheme = CSS::preferred_color_scheme_from_string(color_scheme);
+
+    Optional<CSS::PreferredColorScheme> preferred_color_scheme_override;
+    if (preferred_color_scheme != CSS::PreferredColorScheme::Auto)
+        preferred_color_scheme_override = preferred_color_scheme;
+    page().set_preferred_color_scheme_override_for_testing(preferred_color_scheme_override);
+
+    auto& document = window().associated_document();
+    document.invalidate_style(DOM::StyleInvalidationReason::SettingsChange);
+    document.set_needs_media_query_evaluation();
+}
+
+String Internals::canvas_color_scheme()
+{
+    auto& document = window().associated_document();
+    document.update_layout(DOM::UpdateLayoutReason::Debugging);
+    return MUST(String::from_utf8(CSS::preferred_color_scheme_to_string(document.canvas_color_scheme())));
+}
+
+bool Internals::style_sheet_may_have_has_selectors(CSS::CSSStyleSheet& style_sheet)
+{
+    return style_sheet.selector_insights().has_has_selectors;
+}
+
+WebIDL::UnsignedLongLong Internals::active_image_style_value_animation_count()
+{
+    return CSS::ImageStyleValue::active_animation_timer_count(window().associated_document());
+}
+
 struct AsyncScrollingStateSnapshot {
     Compositor::AsyncScrollingState state;
-    RefPtr<Painting::DisplayList> display_list;
+    RefPtr<Painting::DisplayList const> display_list;
+    Painting::AccumulatedVisualContextTree visual_context_tree;
     RefPtr<Painting::ViewportPaintable> document_paintable;
 };
 
@@ -721,6 +772,7 @@ static Optional<AsyncScrollingStateSnapshot> capture_async_scrolling_state(DOM::
     return AsyncScrollingStateSnapshot {
         .state = Compositor::async_scrolling_state_from_display_list(*display_list),
         .display_list = display_list,
+        .visual_context_tree = document_paintable->visual_context_tree(),
         .document_paintable = document_paintable,
     };
 }
@@ -777,7 +829,7 @@ bool Internals::async_scrolling_state_blocks_wheel_event_at(double x, double y)
     auto snapshot = capture_async_scrolling_state(window().associated_document());
     if (!snapshot.has_value())
         return false;
-    return Compositor::blocks_wheel_event_at_position(snapshot->state, snapshot->display_list, snapshot->document_paintable->scroll_state_snapshot(), { static_cast<float>(x), static_cast<float>(y) });
+    return Compositor::blocks_wheel_event_at_position(snapshot->state, snapshot->display_list, &snapshot->visual_context_tree, snapshot->document_paintable->scroll_state_snapshot(), { static_cast<float>(x), static_cast<float>(y) });
 }
 
 bool Internals::async_scrolling_state_can_wheel_scroll_at(double x, double y, double delta_x, double delta_y, bool force_stale_wheel_event_regions)
@@ -817,6 +869,7 @@ String Internals::async_scrolling_state_wheel_scroll_admission_at(double x, doub
     auto admission = Compositor::admit_wheel_scroll(
         snapshot->state,
         snapshot->display_list,
+        &snapshot->visual_context_tree,
         snapshot->document_paintable->scroll_state_snapshot(),
         { static_cast<float>(x), static_cast<float>(y) },
         { static_cast<float>(delta_x), static_cast<float>(delta_y) },
@@ -832,7 +885,7 @@ String Internals::async_scrolling_state_wheel_target_at(double x, double y, doub
 
     Compositor::AsyncScrollTree scroll_tree;
     scroll_tree.set_state(move(snapshot->state));
-    scroll_tree.rebuild_wheel_hit_test_targets(snapshot->display_list, snapshot->document_paintable->scroll_state_snapshot());
+    scroll_tree.rebuild_wheel_hit_test_targets(snapshot->display_list, &snapshot->visual_context_tree, snapshot->document_paintable->scroll_state_snapshot());
 
     auto target = scroll_tree.hit_test_scroll_node_for_wheel(
         { static_cast<float>(x), static_cast<float>(y) },

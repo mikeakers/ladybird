@@ -9,7 +9,9 @@
 
 #include <AK/Forward.h>
 #include <AK/Function.h>
+#include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <AK/JsonValue.h>
 #include <AK/LexicalPath.h>
 #include <AK/OwnPtr.h>
 #include <AK/Queue.h>
@@ -19,6 +21,7 @@
 #include <LibCore/Forward.h>
 #include <LibCore/Promise.h>
 #include <LibCore/SharedVersion.h>
+#include <LibGfx/Color.h>
 #include <LibGfx/Cursor.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/SharedImage.h>
@@ -119,10 +122,17 @@ public:
     void get_hovered_node_id();
 
     void inspect_dom_node(Web::UniqueNodeID node_id, DOMNodeProperties::Type, Optional<Web::CSS::PseudoElement> pseudo_element);
+    void inspect_grid_layouts(Web::UniqueNodeID root_node_id);
+    void inspect_current_grid(Web::UniqueNodeID node_id);
+    void inspect_current_flexbox(Web::UniqueNodeID node_id, bool only_look_at_parents);
     void clear_inspected_dom_node();
 
     void highlight_dom_node(Web::UniqueNodeID node_id, Optional<Web::CSS::PseudoElement> pseudo_element);
     void clear_highlighted_dom_node();
+    void highlight_flexbox(Web::UniqueNodeID node_id, JsonValue options);
+    void clear_flexbox_highlight(Web::UniqueNodeID node_id);
+    void highlight_grid(Web::UniqueNodeID node_id, JsonValue options);
+    void clear_grid_highlight(Web::UniqueNodeID node_id);
 
     void set_listen_for_dom_mutations(bool);
     void did_connect_devtools_client();
@@ -170,6 +180,9 @@ public:
     Web::HTML::AudioPlayState audio_play_state() const { return m_audio_play_state; }
 
     void did_update_navigation_buttons_state(Badge<WebContentClient>, bool back_enabled, bool forward_enabled) const;
+    void did_change_needs_beforeunload_check(Badge<WebContentClient>, bool needs_beforeunload_check);
+    void did_change_background_color(Badge<WebContentClient>, Gfx::Color);
+    Gfx::Color page_background_color() const { return m_page_background_color; }
 
     void did_allocate_backing_stores(Badge<WebContentClient>, i32 front_bitmap_id, Gfx::SharedImage front_backing_store, i32 back_bitmap_id, Gfx::SharedImage back_backing_store);
 
@@ -192,6 +205,8 @@ public:
     void use_native_user_style_sheet();
 
     void request_close();
+    Function<void()> prepare_for_immediate_close();
+    bool needs_beforeunload_check() const { return m_needs_beforeunload_check; }
 
     Function<void()> on_ready_to_paint;
     Function<String(Web::HTML::ActivateTab, Web::HTML::WebViewHints, Optional<u64>)> on_new_web_view;
@@ -226,6 +241,9 @@ public:
     Function<void()> on_request_dismiss_dialog;
     Function<void(JsonObject)> on_received_dom_tree;
     Function<void(DOMNodeProperties)> on_received_dom_node_properties;
+    Function<void(JsonArray)> on_received_grid_layouts;
+    Function<void(Optional<JsonObject>)> on_received_current_grid;
+    Function<void(Optional<JsonObject>)> on_received_current_flexbox;
     Function<void(JsonObject)> on_received_accessibility_tree;
     Function<void(Web::UniqueNodeID)> on_received_hovered_node_id;
     Function<void(Mutation)> on_dom_mutation_received;
@@ -258,6 +276,7 @@ public:
     Function<void(JsonValue)> on_test_variant_metadata;
     Function<void(size_t current_match_index, Optional<size_t> const& total_match_count)> on_find_in_page;
     Function<void(Gfx::Color)> on_theme_color_change;
+    Function<void(Gfx::Color)> on_page_background_color_change;
     Function<void(Web::HTML::AudioPlayState)> on_audio_play_state_changed;
     Function<void()> on_web_content_crashed;
     Function<void()> on_web_content_process_change_for_cross_site_navigation;
@@ -277,6 +296,9 @@ public:
     Action& toggle_bookmark_action() { return *m_toggle_bookmark_action; }
     Action& reset_zoom_action() { return *m_reset_zoom_action; }
 
+    WebContentClient& client();
+    WebContentClient const& client() const;
+
     virtual Web::DevicePixelSize viewport_size() const = 0;
     virtual Gfx::IntPoint to_content_position(Gfx::IntPoint widget_position) const = 0;
     virtual Gfx::IntPoint to_widget_position(Gfx::IntPoint content_position) const = 0;
@@ -288,8 +310,6 @@ protected:
 
     ViewImplementation();
 
-    WebContentClient& client();
-    WebContentClient const& client() const;
     u64 page_id() const;
 
     void set_url(URL::URL);
@@ -299,6 +319,9 @@ protected:
     void apply_zoom_for_current_host();
 
     void handle_resize();
+    void set_page_background_color_to_system_canvas(bool dark);
+    void set_page_background_color(Gfx::Color);
+    Gfx::Color preferred_canvas_background_color() const;
     void load_crash_page_html(StringView, URL::URL const& crashed_url);
 
     enum class CreateNewClient {
@@ -394,6 +417,9 @@ protected:
 
     OwnPtr<Gfx::SharedImageBuffer> m_backup_shared_image_buffer;
     Web::DevicePixelSize m_backup_bitmap_size;
+    Gfx::Color m_page_background_color { 255, 255, 255 };
+    Gfx::Color m_system_canvas_background_color { 255, 255, 255 };
+    Web::CSS::PreferredColorScheme m_preferred_color_scheme { Web::CSS::PreferredColorScheme::Auto };
 
     bool m_should_suppress_history_for_current_load { false };
     bool m_should_suppress_history_for_next_load { false };
@@ -423,6 +449,7 @@ protected:
     u64 m_next_navigation_listener_id { 1 };
 
     bool m_devtools_connected { false };
+    bool m_needs_beforeunload_check { true };
 };
 
 }

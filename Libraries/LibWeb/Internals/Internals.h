@@ -12,6 +12,12 @@
 #include <LibWeb/UIEvents/MouseButton.h>
 #include <LibWeb/WebIDL/Types.h>
 
+namespace Web::CSS {
+
+class CSSStyleSheet;
+
+}
+
 namespace Web::Internals {
 
 class WEB_API Internals final : public InternalsBase {
@@ -54,14 +60,17 @@ public:
     void mouse_down(double x, double y, WebIDL::UnsignedShort click_count, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers);
     void mouse_up(double x, double y, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers);
     void mouse_move(double x, double y, WebIDL::UnsignedShort modifiers);
+    void mouse_leave();
 
     // High-level mouse conveniences
     void click(double x, double y, WebIDL::UnsignedShort click_count, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers);
     void click_and_hold(double x, double y, WebIDL::UnsignedShort click_count, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers);
     GC::Ref<WebIDL::Promise> wheel(double x, double y, double delta_x, double delta_y);
-    void pinch(double x, double y, double scale_delta);
+    void pinch(double x, double y, double scale_delta, WebIDL::UnsignedShort modifiers);
 
     String current_cursor();
+
+    String selected_text_for_clipboard();
 
     WebIDL::ExceptionOr<bool> dispatch_user_activated_event(DOM::EventTarget&, DOM::Event& event);
 
@@ -114,6 +123,11 @@ public:
 
     JS::Object* get_style_invalidation_counters();
     void reset_style_invalidation_counters();
+    void update_style();
+    void set_preferred_color_scheme(StringView color_scheme);
+    String canvas_color_scheme();
+    bool style_sheet_may_have_has_selectors(CSS::CSSStyleSheet&);
+    WebIDL::UnsignedLongLong active_image_style_value_animation_count();
     JS::Object* async_scrolling_state();
     bool async_scrolling_state_blocks_wheel_event_at(double x, double y);
     bool async_scrolling_state_can_wheel_scroll_at(double x, double y, double delta_x, double delta_y, bool force_stale_wheel_event_regions);

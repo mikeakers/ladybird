@@ -9,6 +9,7 @@
 
 #include <AK/StdLibExtras.h>
 #include <AK/String.h>
+#include <LibCrypto/BigInt/UnsignedBigInteger.h>
 #include <LibIPC/File.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
@@ -986,7 +987,7 @@ private:
 };
 
 // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializewithtransfer
-WebIDL::ExceptionOr<SerializedTransferRecord> structured_serialize_with_transfer(JS::VM& vm, JS::Value value, Vector<GC::Root<JS::Object>> const& transfer_list)
+WebIDL::ExceptionOr<SerializedTransferRecord> structured_serialize_with_transfer(JS::VM& vm, JS::Value value, ReadonlySpan<GC::Ref<JS::Object>> transfer_list)
 {
     // 1. Let memory be an empty map.
     SerializationMemory memory = {};
@@ -1347,6 +1348,20 @@ WebIDL::ExceptionOr<ByteBuffer> TransferDataDecoder::decode_buffer(JS::Realm& re
     }
 
     return buffer.release_value();
+}
+
+void TransferDataEncoder::encode_unsigned_big_integer(::Crypto::UnsignedBigInteger const& value)
+{
+    auto buffer = MUST(ByteBuffer::create_zeroed(value.byte_length()));
+    auto written = value.export_data(buffer.bytes());
+    VERIFY(written.size() == buffer.size());
+    encode(buffer);
+}
+
+WebIDL::ExceptionOr<::Crypto::UnsignedBigInteger> TransferDataDecoder::decode_unsigned_big_integer(JS::Realm& realm)
+{
+    auto buffer = TRY(decode_buffer(realm));
+    return ::Crypto::UnsignedBigInteger::import_data(buffer);
 }
 
 }

@@ -28,6 +28,7 @@
 #include <LibWeb/DOM/EventDispatcher.h>
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/DOM/IDLEventListener.h>
+#include <LibWeb/DOM/Node.h>
 #include <LibWeb/HTML/BeforeUnloadEvent.h>
 #include <LibWeb/HTML/CloseWatcherManager.h>
 #include <LibWeb/HTML/ErrorEvent.h>
@@ -37,6 +38,8 @@
 #include <LibWeb/HTML/HTMLBodyElement.h>
 #include <LibWeb/HTML/HTMLFormElement.h>
 #include <LibWeb/HTML/HTMLFrameSetElement.h>
+#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/Page/Page.h>
@@ -158,8 +161,8 @@ static FlattenedAddEventListenerOptions flatten_add_event_listener_options(Varia
             passive = add_event_listener_options.passive;
 
         // 3. If options["signal"] exists, then set signal to options["signal"].
-        if (add_event_listener_options.signal.has_value())
-            signal = add_event_listener_options.signal->ptr();
+        if (add_event_listener_options.signal)
+            signal = add_event_listener_options.signal;
     }
 
     // 5. Return capture, passive, once, and signal.
@@ -205,9 +208,27 @@ static void invalidate_compositor_wheel_event_listener_state(EventTarget& event_
     }
 
     if (auto* node = as_if<Node>(event_target)) {
+        node->update_inside_blocking_wheel_event_handler_state_for_subtree();
         node->set_needs_repaint();
         node->document().page().invalidate_compositor_wheel_event_listener_state();
     }
+}
+
+static void update_needs_beforeunload_check(EventTarget& event_target, DOMEventListener const& listener)
+{
+    if (listener.type != HTML::EventNames::beforeunload)
+        return;
+
+    auto* window = as_if<HTML::Window>(event_target);
+    if (!window)
+        return;
+
+    auto navigable = window->associated_document().navigable();
+    if (!navigable)
+        return;
+
+    if (auto traversable = navigable->traversable_navigable())
+        traversable->page().update_needs_beforeunload_check();
 }
 
 // https://dom.spec.whatwg.org/#dom-eventtarget-addeventlistener
@@ -266,6 +287,7 @@ void EventTarget::add_an_event_listener(DOMEventListener& listener)
     if (it == event_listener_list.end()) {
         event_listener_list.append(listener);
         invalidate_compositor_wheel_event_listener_state(*this, listener);
+        update_needs_beforeunload_check(*this, listener);
     }
 
     // 6. If listener’s signal is not null, then add the following abort steps to it:
@@ -319,8 +341,10 @@ void EventTarget::remove_an_event_listener(DOMEventListener& listener)
     listener.removed = true;
     VERIFY(m_data);
     auto did_remove = m_data->event_listener_list.remove_first_matching([&](auto& entry) { return entry.ptr() == &listener; });
-    if (did_remove)
+    if (did_remove) {
         invalidate_compositor_wheel_event_listener_state(*this, listener);
+        update_needs_beforeunload_check(*this, listener);
+    }
 }
 
 // https://dom.spec.whatwg.org/#dom-eventtarget-dispatchevent

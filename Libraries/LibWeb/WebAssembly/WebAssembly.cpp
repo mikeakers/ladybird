@@ -9,6 +9,8 @@
 #include <AK/MemoryStream.h>
 #include <AK/ScopeGuard.h>
 #include <AK/StringBuilder.h>
+#include <LibCrypto/Hash/SHA2.h>
+#include <LibHTTP/Cache/Utilities.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/BigInt.h>
@@ -19,13 +21,17 @@
 #include <LibJS/Runtime/Object.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibJS/Runtime/ValueInlines.h>
+#include <LibRequests/RequestClient.h>
+#include <LibURL/Parser.h>
 #include <LibWasm/AbstractMachine/Validator.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/Response.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
+#include <LibWeb/Fetch/Infrastructure/URL.h>
 #include <LibWeb/Fetch/Response.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
+#include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/WebAssembly/Global.h>
 #include <LibWeb/WebAssembly/Instance.h>
@@ -46,7 +52,7 @@ static GC::Ref<WebIDL::Promise> compile_potential_webassembly_response(JS::VM&, 
 
 namespace Detail {
 
-HashMap<GC::Ptr<JS::Object>, WebAssemblyCache> s_caches;
+GC::WeakHashMap<JS::Object, WebAssemblyCache> s_caches;
 
 WebAssemblyCache& get_cache(JS::Realm& realm)
 {
@@ -59,7 +65,7 @@ void visit_edges(JS::Object& object, JS::Cell::Visitor& visitor)
 {
     auto& global_object = HTML::relevant_global_object(object);
     if (auto maybe_cache = Detail::s_caches.get(global_object); maybe_cache.has_value()) {
-        auto& cache = maybe_cache.release_value();
+        auto& cache = maybe_cache.value();
         visitor.visit(cache.function_instances());
         visitor.visit(cache.imported_objects());
         visitor.visit(cache.extern_values());
@@ -98,7 +104,7 @@ void initialize(JS::Object& self, JS::Realm&)
 }
 
 // https://webassembly.github.io/spec/js-api/#dom-webassembly-validate
-bool validate(JS::VM& vm, GC::Root<WebIDL::BufferSource>& bytes)
+bool validate(JS::VM& vm, GC::Ref<WebIDL::BufferSource> bytes)
 {
     // 1. Let stableBytes be a copy of the bytes held by the buffer bytes.
     auto stable_bytes = WebIDL::get_buffer_source_copy(*bytes->raw_object());
@@ -119,7 +125,7 @@ bool validate(JS::VM& vm, GC::Root<WebIDL::BufferSource>& bytes)
 }
 
 // https://webassembly.github.io/spec/js-api/#dom-webassembly-compile
-WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> compile(JS::VM& vm, GC::Root<WebIDL::BufferSource>& bytes)
+WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> compile(JS::VM& vm, GC::Ref<WebIDL::BufferSource> bytes)
 {
     auto& realm = *vm.current_realm();
 
@@ -135,15 +141,15 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> compile(JS::VM& vm, GC::Root<WebID
 }
 
 // https://webassembly.github.io/spec/web-api/index.html#dom-webassembly-compilestreaming
-WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> compile_streaming(JS::VM& vm, GC::Root<WebIDL::Promise> source)
+WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> compile_streaming(JS::VM& vm, GC::Ref<WebIDL::Promise> source)
 {
     //  The compileStreaming(source) method, when invoked, returns the result of compiling a potential WebAssembly response with source.
-    return compile_potential_webassembly_response(vm, *source);
+    return compile_potential_webassembly_response(vm, source);
 }
 
 // https://webassembly.github.io/spec/js-api/#dom-webassembly-instantiate
 // https://webassembly.github.io/content-security-policy/js-api/#dom-webassembly-instantiate
-WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate(JS::VM& vm, GC::Root<WebIDL::BufferSource>& bytes, Optional<GC::Root<JS::Object>>& import_object_handle)
+WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate(JS::VM& vm, GC::Ref<WebIDL::BufferSource> bytes, GC::Ptr<JS::Object> import_object)
 {
     auto& realm = *vm.current_realm();
 
@@ -161,30 +167,26 @@ WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate(JS::VM& vm, GC::Root<W
     auto promise_of_module = asynchronously_compile_webassembly_module(vm, stable_bytes.release_value());
 
     // 4. Instantiate promiseOfModule with imports importObject and return the result.
-    GC::Ptr<JS::Object> const import_object = import_object_handle.has_value() ? import_object_handle.value().ptr() : nullptr;
     return instantiate_promise_of_module(vm, promise_of_module, import_object);
 }
 
 // https://webassembly.github.io/spec/js-api/#dom-webassembly-instantiate-moduleobject-importobject
-WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate(JS::VM& vm, Module const& module_object, Optional<GC::Root<JS::Object>>& import_object)
+WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate(JS::VM& vm, GC::Ref<Module> module_object, GC::Ptr<JS::Object> import_object)
 {
     // 1. Asynchronously instantiate the WebAssembly module moduleObject importing importObject, and return the result.
-    GC::Ref<Module> module { const_cast<Module&>(module_object) };
-    GC::Ptr<JS::Object> const imports = import_object.has_value() ? import_object.value().ptr() : nullptr;
-    return asynchronously_instantiate_webassembly_module(vm, module, imports);
+    return asynchronously_instantiate_webassembly_module(vm, module_object, import_object);
 }
 
 // https://webassembly.github.io/spec/web-api/index.html#dom-webassembly-instantiatestreaming
-WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate_streaming(JS::VM& vm, GC::Root<WebIDL::Promise> source, Optional<GC::Root<JS::Object>>& import_object)
+WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate_streaming(JS::VM& vm, GC::Ref<WebIDL::Promise> source, GC::Ptr<JS::Object> import_object)
 {
     // The instantiateStreaming(source, importObject) method, when invoked, performs the following steps:
 
     // 1. Let promiseOfModule be the result of compiling a potential WebAssembly response with source.
-    auto promise_of_module = compile_potential_webassembly_response(vm, *source);
+    auto promise_of_module = compile_potential_webassembly_response(vm, source);
 
     // 2. Return the result of instantiating the promise of a module promiseOfModule with imports importObject.
-    auto imports = GC::Ptr { import_object.has_value() ? import_object.value().ptr() : nullptr };
-    return instantiate_promise_of_module(vm, promise_of_module, imports);
+    return instantiate_promise_of_module(vm, promise_of_module, import_object);
 }
 
 namespace Detail {
@@ -430,14 +432,72 @@ JS::ThrowCompletionOr<NonnullRefPtr<CompiledWebAssemblyModule>> compile_a_webass
 {
     TRY(host_ensure_can_compile_wasm_bytes(vm));
 
+    Wasm::ModuleStats stats;
+    stats.input_size_bytes = data.size();
+
+    auto parse_start = MonotonicTime::now();
     FixedMemoryStream stream { data.bytes() };
     auto module_result = Wasm::Module::parse(stream);
+    stats.parse_time = MonotonicTime::now() - parse_start;
     if (module_result.is_error()) {
         return vm.throw_completion<CompileError>(Wasm::parse_error_to_byte_string(module_result.error()));
     }
 
+    // Content-keyed disk cache: hash the wasm bytes, slot into the HTTP side-data
+    // shelf under a synthetic wasm-cache://<hex> URL (with a stub index entry to
+    // satisfy the shelf's "associated data needs a real entry" invariant). Works
+    // regardless of whether the caller had a URL.
+    // existing_blob view is borrowed below; the AnonymousBuffer must outlive validate().
+    Optional<Core::AnonymousBuffer> existing_buf;
+    Optional<Wasm::CompileCacheConfig> wasm_cache_config;
+    if (ResourceLoader::is_initialized() && ResourceLoader::the().request_client()) {
+        auto digest = ::Crypto::Hash::SHA256::hash(data.data(), data.size());
+        __builtin_memcpy(stats.wasm_hash.data(), digest.bytes().data(), 32);
+
+        StringBuilder hex_builder;
+        for (auto byte : digest.bytes())
+            hex_builder.appendff("{:02x}", byte);
+        auto synthetic_url = URL::Parser::basic_parse(ByteString::formatted("wasm-cache://{}", hex_builder.to_byte_string()));
+        if (synthetic_url.has_value()) {
+            auto method = "GET"_string.to_byte_string();
+            (void)ResourceLoader::the().request_client()->create_synthetic_cache_entry(*synthetic_url, method);
+
+            Wasm::CompileCacheConfig config;
+            __builtin_memcpy(config.wasm_hash.data(), digest.bytes().data(), 32);
+
+            auto retrieve_result = ResourceLoader::the().request_client()->retrieve_cache_associated_data(
+                *synthetic_url, method, OptionalNone {}, 0u,
+                HTTP::CacheEntryAssociatedData::WebAssemblyCompiledCode);
+            if (!retrieve_result.is_error()) {
+                if (auto buf = retrieve_result.release_value(); buf.has_value()) {
+                    existing_buf = buf.release_value();
+                    config.existing_blob = existing_buf->bytes();
+                }
+            }
+
+            config.on_compiled = [url = *synthetic_url, method = move(method)](ByteBuffer blob) mutable {
+                if (!ResourceLoader::is_initialized() || !ResourceLoader::the().request_client())
+                    return;
+                (void)ResourceLoader::the().request_client()->store_cache_associated_data(
+                    url, method, OptionalNone {}, 0u,
+                    HTTP::CacheEntryAssociatedData::WebAssemblyCompiledCode, blob.bytes());
+            };
+
+            config.out_cranelift_time = &stats.cranelift_time;
+            config.out_function_count = &stats.function_count;
+            config.out_cranelift_blob_size_bytes = &stats.cranelift_blob_size_bytes;
+            config.out_cache_hit = &stats.cache_hit;
+            wasm_cache_config = move(config);
+        }
+    }
+
     auto& cache = get_cache(*vm.current_realm());
-    if (auto validation_result = cache.abstract_machine().validate(module_result.value()); validation_result.is_error()) {
+    auto validate_start = MonotonicTime::now();
+    auto validation_result = cache.abstract_machine().validate(module_result.value(), move(wasm_cache_config));
+    stats.validate_time = MonotonicTime::now() - validate_start;
+    Wasm::record_module_stats(stats);
+
+    if (validation_result.is_error()) {
         return vm.throw_completion<CompileError>(validation_result.error().error_string);
     }
     auto compiled_module = make_ref_counted<CompiledWebAssemblyModule>(module_result.release_value());

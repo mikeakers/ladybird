@@ -8,13 +8,18 @@
 mod rust_allocator;
 
 mod css_tokenizer;
+mod encoding_detection;
 
 pub use libweb_html_tokenizer as html_tokenizer;
 
 use std::ffi::c_void;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 
-pub use css_tokenizer::{CssHashType, CssNumberType, CssToken, CssTokenType};
+pub use css_tokenizer::CssHashType;
+pub use css_tokenizer::CssNumberType;
+pub use css_tokenizer::CssToken;
+pub use css_tokenizer::CssTokenType;
 
 fn abort_on_panic<F: FnOnce() -> R, R>(f: F) -> R {
     match catch_unwind(AssertUnwindSafe(f)) {

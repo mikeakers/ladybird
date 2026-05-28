@@ -12,7 +12,9 @@
 
 #pragma once
 
+#include <AK/ByteString.h>
 #include <AK/StringBuilder.h>
+#include <AK/Vector.h>
 #include <LibIDL/Types.h>
 
 namespace IDL {
@@ -20,8 +22,6 @@ namespace IDL {
 void generate_header(Module const&, StringBuilder&);
 void generate_implementation(Module const&, StringBuilder&);
 
-CppType idl_type_name_to_cpp_type(Type const& type, Context const& context, Optional<HashMap<ByteString, ByteString> const&> extended_attributes = {});
-
-extern Vector<StringView> g_header_search_paths;
+extern Vector<ByteString> g_header_search_paths;
 
 }

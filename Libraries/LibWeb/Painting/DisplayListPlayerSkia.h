@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Function.h>
 #include <LibGfx/DecodedImageFrameSkiaImageCache.h>
 #include <LibWeb/Painting/DisplayList.h>
 #include <LibWeb/Painting/DisplayListCommand.h>
@@ -22,8 +23,11 @@ public:
     explicit DisplayListPlayerSkia(RefPtr<Gfx::SkiaBackendContext>);
     ~DisplayListPlayerSkia();
 
+    void flush(Gfx::PaintingSurface&) override;
+    void flush_async(Gfx::PaintingSurface&, Function<void()>&&);
+    void paint_scrollbar(Gfx::PaintingSurface&, PaintScrollBar const&);
+
 private:
-    void flush() override;
     void draw_glyph_run(DrawGlyphRun const&) override;
     void fill_rect(FillRect const&) override;
     void draw_scaled_decoded_image_frame(DrawScaledDecodedImageFrame const&) override;

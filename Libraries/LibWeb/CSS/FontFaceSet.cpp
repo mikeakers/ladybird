@@ -11,6 +11,7 @@
 #include <LibJS/Runtime/Set.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/FontFaceSet.h>
+#include <LibWeb/Bindings/FontFaceSetLoadEvent.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/FontComputer.h>
 #include <LibWeb/CSS/FontFace.h>
@@ -62,7 +63,7 @@ void FontFaceSet::visit_edges(Cell::Visitor& visitor)
 }
 
 // https://drafts.csswg.org/css-font-loading/#dom-fontfaceset-add
-WebIDL::ExceptionOr<GC::Ref<FontFaceSet>> FontFaceSet::add(GC::Root<FontFace> face)
+WebIDL::ExceptionOr<GC::Ref<FontFaceSet>> FontFaceSet::add(GC::Ref<FontFace> face)
 {
     // 1. If font is already in the FontFaceSet’s set entries, skip to the last step of this algorithm immediately.
     if (m_set_entries->set_has(face))
@@ -106,7 +107,7 @@ void FontFaceSet::add_css_connected_font(GC::Ref<FontFace> face)
 }
 
 // https://drafts.csswg.org/css-font-loading/#dom-fontfaceset-delete
-bool FontFaceSet::delete_(GC::Root<FontFace> face)
+bool FontFaceSet::delete_(GC::Ref<FontFace> face)
 {
     // 1. If font is CSS-connected, return false and exit this algorithm immediately.
     if (face->is_css_connected()) {
@@ -375,7 +376,7 @@ void FontFaceSet::fire_a_font_load_event(FlyString name, Vector<GC::Ref<FontFace
     // event named e using the FontFaceSetLoadEvent interface that also meets these conditions:
     // 1. The fontfaces attribute is initialized to the result of filtering font faces to only contain FontFace
     //    objects contained in target.
-    Bindings::FontFaceSetLoadEventInit load_event_init {};
+    Bindings::FontFaceSetLoadEventInit load_event_init;
     for (auto const& font_face : font_faces) {
         if (set_entries()->set_has(font_face))
             load_event_init.fontfaces.append(font_face);

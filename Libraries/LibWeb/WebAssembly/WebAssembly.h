@@ -9,11 +9,13 @@
 
 #include <AK/Optional.h>
 #include <LibGC/Root.h>
+#include <LibGC/WeakHashMap.h>
 #include <LibJS/Forward.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibJS/Runtime/PrototypeObject.h>
 #include <LibJS/Runtime/Value.h>
+#include <LibURL/URL.h>
 #include <LibWasm/AbstractMachine/AbstractMachine.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
@@ -24,13 +26,13 @@ WEB_API void visit_edges(JS::Object&, JS::Cell::Visitor&);
 WEB_API void finalize(JS::Object&);
 WEB_API void initialize(JS::Object&, JS::Realm&);
 
-WEB_API bool validate(JS::VM&, GC::Root<WebIDL::BufferSource>& bytes);
-WEB_API WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> compile(JS::VM&, GC::Root<WebIDL::BufferSource>& bytes);
-WEB_API WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> compile_streaming(JS::VM&, GC::Root<WebIDL::Promise> source);
+WEB_API bool validate(JS::VM&, GC::Ref<WebIDL::BufferSource> bytes);
+WEB_API WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> compile(JS::VM&, GC::Ref<WebIDL::BufferSource> bytes);
+WEB_API WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> compile_streaming(JS::VM&, GC::Ref<WebIDL::Promise> source);
 
-WEB_API WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate(JS::VM&, GC::Root<WebIDL::BufferSource>& bytes, Optional<GC::Root<JS::Object>>& import_object);
-WEB_API WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate(JS::VM&, Module const& module_object, Optional<GC::Root<JS::Object>>& import_object);
-WEB_API WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate_streaming(JS::VM&, GC::Root<WebIDL::Promise> source, Optional<GC::Root<JS::Object>>& import_object);
+WEB_API WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate(JS::VM&, GC::Ref<WebIDL::BufferSource> bytes, GC::Ptr<JS::Object> import_object);
+WEB_API WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate(JS::VM&, GC::Ref<Module> module_object, GC::Ptr<JS::Object> import_object);
+WEB_API WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate_streaming(JS::VM&, GC::Ref<WebIDL::Promise> source, GC::Ptr<JS::Object> import_object);
 
 namespace Detail {
 
@@ -118,7 +120,7 @@ JS::ThrowCompletionOr<void> host_ensure_can_compile_wasm_bytes(JS::VM&);
 JS::ThrowCompletionOr<JS::HandledByHost> host_resize_array_buffer(JS::VM&, JS::ArrayBuffer&, size_t);
 JS::ThrowCompletionOr<JS::HandledByHost> host_grow_shared_array_buffer(JS::VM&, JS::ArrayBuffer&, size_t);
 
-extern HashMap<GC::Ptr<JS::Object>, WebAssemblyCache> s_caches;
+extern GC::WeakHashMap<JS::Object, WebAssemblyCache> s_caches;
 
 }
 

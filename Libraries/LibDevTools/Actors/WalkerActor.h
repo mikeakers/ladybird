@@ -31,6 +31,7 @@ public:
 
     static Optional<Node> dom_node_for(WeakPtr<WalkerActor> const&, StringView actor);
     Optional<Node> dom_node(StringView actor);
+    Optional<String> node_actor_name_for(Web::UniqueNodeID) const;
 
 private:
     WalkerActor(DevToolsServer&, String name, WeakPtr<TabActor>, JsonObject dom_tree);
@@ -42,6 +43,7 @@ private:
 
     Optional<JsonObject const&> previous_sibling_for_node(JsonObject const& node);
     Optional<JsonObject const&> next_sibling_for_node(JsonObject const& node);
+    Optional<JsonObject const&> parent_grid_node_for_node(JsonObject const& node) const;
     Optional<JsonObject const&> remove_node(JsonObject const& node);
 
     void new_dom_node_mutation(WebView::Mutation);

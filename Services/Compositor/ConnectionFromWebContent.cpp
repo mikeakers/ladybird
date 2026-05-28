@@ -59,22 +59,16 @@ void ConnectionFromWebContent::set_presentation_mode(Web::Compositor::Compositor
     m_compositor_state->set_presentation_mode(context_id, move(presentation_mode));
 }
 
-void ConnectionFromWebContent::stop_presenting_to_client(Web::Compositor::CompositorContextId context_id)
-{
-    verify_context_is_owned_by_this_connection(context_id);
-    m_compositor_state->stop_presenting_to_client(context_id);
-}
-
 void ConnectionFromWebContent::destroy_context(Web::Compositor::CompositorContextId context_id)
 {
     verify_context_is_owned_by_this_connection(context_id);
     m_compositor_state->destroy_context(context_id);
 }
 
-void ConnectionFromWebContent::update_display_list(Web::Compositor::CompositorContextId context_id, NonnullRefPtr<Web::Painting::DisplayList> display_list, Web::Painting::DisplayListResourceTransaction resource_transaction, Web::Painting::ScrollStateSnapshot scroll_state_snapshot)
+void ConnectionFromWebContent::update_display_list(Web::Compositor::CompositorContextId context_id, NonnullRefPtr<Web::Painting::DisplayList> display_list, Web::Painting::AccumulatedVisualContextTree visual_context_tree, Web::Painting::DisplayListResourceTransaction resource_transaction, Web::Painting::ScrollStateSnapshot scroll_state_snapshot)
 {
     verify_context_is_owned_by_this_connection(context_id);
-    m_compositor_state->update_display_list(context_id, move(display_list), move(resource_transaction), move(scroll_state_snapshot));
+    m_compositor_state->update_display_list(context_id, move(display_list), move(visual_context_tree), move(resource_transaction), move(scroll_state_snapshot));
 }
 
 void ConnectionFromWebContent::update_scroll_state(Web::Compositor::CompositorContextId context_id, Web::Painting::ScrollStateSnapshot scroll_state_snapshot)
@@ -134,10 +128,10 @@ Messages::CompositorWebContentServer::TakePendingAsyncScrollUpdatesResponse Conn
     return m_compositor_state->take_pending_async_scroll_updates(context_id);
 }
 
-void ConnectionFromWebContent::viewport_size_updated(Web::Compositor::CompositorContextId context_id, Gfx::IntSize viewport_size, bool is_top_level_traversable, Web::Compositor::WindowResizingInProgress window_resize_in_progress)
+void ConnectionFromWebContent::viewport_size_updated(Web::Compositor::CompositorContextId context_id, Gfx::IntSize viewport_size, Web::Compositor::WindowResizingInProgress window_resize_in_progress)
 {
     verify_context_is_owned_by_this_connection(context_id);
-    m_compositor_state->viewport_size_updated(context_id, viewport_size, is_top_level_traversable, window_resize_in_progress);
+    m_compositor_state->viewport_size_updated(context_id, viewport_size, window_resize_in_progress);
 }
 
 void ConnectionFromWebContent::present_frame(Web::Compositor::CompositorContextId context_id, Gfx::IntRect viewport_rect)

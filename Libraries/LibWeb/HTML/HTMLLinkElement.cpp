@@ -930,9 +930,9 @@ void HTMLLinkElement::process_stylesheet_resource(bool success, Fetch::Infrastru
     }
 }
 
-static NonnullRefPtr<Core::Promise<bool>> decode_favicon(ReadonlyBytes favicon_data, URL::URL const& favicon_url, GC::Ref<DOM::Document> document)
+static NonnullRefPtr<Core::Promise<NonnullRefPtr<Gfx::Bitmap const>>> decode_favicon(ReadonlyBytes favicon_data, URL::URL const& favicon_url, GC::Ref<DOM::Document> document)
 {
-    auto promise = Core::Promise<bool>::construct();
+    auto promise = Core::Promise<NonnullRefPtr<Gfx::Bitmap const>>::construct();
 
     if (favicon_url.basename().ends_with(".svg"sv)) {
         auto result = SVG::SVGDecodedImageData::create(document->realm(), document->page(), favicon_url, favicon_data);
@@ -948,10 +948,8 @@ static NonnullRefPtr<Core::Promise<bool>> decode_favicon(ReadonlyBytes favicon_d
             promise->reject(Error::from_string_view("Failed to get bitmap from SVG favicon"sv));
             return promise;
         }
-        auto navigable = document->navigable();
-        if (navigable && navigable->is_traversable())
-            navigable->traversable_navigable()->page().client().page_did_change_favicon(decoded_frame->bitmap());
-        promise->resolve(true);
+
+        promise->resolve(decoded_frame->bitmap_ref());
         return promise;
     }
 
@@ -964,11 +962,7 @@ static NonnullRefPtr<Core::Promise<bool>> decode_favicon(ReadonlyBytes favicon_d
         auto favicon_bitmap = decoded_image.frames[0].bitmap;
         dbgln_if(IMAGE_DECODER_DEBUG, "Decoded favicon, {}", favicon_bitmap->size());
 
-        auto navigable = document->navigable();
-        if (navigable && navigable->is_traversable())
-            navigable->traversable_navigable()->page().client().page_did_change_favicon(*favicon_bitmap);
-
-        promise->resolve(true);
+        promise->resolve(favicon_bitmap.release_nonnull());
         return {};
     };
 
@@ -977,15 +971,17 @@ static NonnullRefPtr<Core::Promise<bool>> decode_favicon(ReadonlyBytes favicon_d
     return promise;
 }
 
-bool HTMLLinkElement::load_favicon_and_use_if_window_is_active()
+RefPtr<Gfx::Bitmap const> HTMLLinkElement::load_favicon_if_window_is_active()
 {
     if (!has_loaded_icon())
-        return false;
+        return {};
 
     // FIXME: Refactor the caller(s) to handle the async nature of image loading
     auto promise = decode_favicon(m_loaded_icon->icon, m_loaded_icon->url, document());
-    auto result = promise->await();
-    return !result.is_error();
+
+    if (auto result = promise->await(); !result.is_error())
+        return result.release_value();
+    return {};
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#rel-icon:the-link-element-3
@@ -1040,7 +1036,11 @@ void HTMLLinkElement::load_fallback_favicon_if_needed(GC::Ref<DOM::Document> doc
         auto global = GC::Ref { realm.global_object() };
 
         auto process_body = GC::create_function(realm.heap(), [document, request](ByteBuffer body) {
-            (void)decode_favicon(body, request->url(), document);
+            decode_favicon(body, request->url(), document)
+                ->when_resolved(GC::weak_callback(*document, [](DOM::Document& document, NonnullRefPtr<Gfx::Bitmap const>& favicon) {
+                    if (auto navigable = document.navigable(); navigable && navigable->is_traversable())
+                        navigable->traversable_navigable()->page().client().page_did_change_favicon(*favicon);
+                }));
         });
         auto process_body_error = GC::create_function(realm.heap(), [](JS::Value) {
         });

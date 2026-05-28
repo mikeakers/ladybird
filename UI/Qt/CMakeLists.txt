@@ -9,6 +9,7 @@ target_sources(ladybird PRIVATE
     Autocomplete.cpp
     BookmarksBar.cpp
     BrowserWindow.cpp
+    ChromeStyle.cpp
     EventLoopImplementationQt.cpp
     EventLoopImplementationQtEventTarget.cpp
     FindInPageWidget.cpp
@@ -21,6 +22,7 @@ target_sources(ladybird PRIVATE
     TabBar.cpp
     TVGIconEngine.cpp
     WebContentView.cpp
+    WindowControlButton.cpp
     ladybird.qrc
 )
 target_link_libraries(ladybird PRIVATE Qt::Core Qt::Gui Qt::Widgets)

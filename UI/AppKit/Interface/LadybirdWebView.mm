@@ -249,6 +249,16 @@ struct HideCursor {
     m_web_view_bridge->request_close();
 }
 
+- (Function<void()>)prepareForImmediateClose
+{
+    return m_web_view_bridge->prepare_for_immediate_close();
+}
+
+- (BOOL)needsBeforeUnloadCheck
+{
+    return m_web_view_bridge->needs_beforeunload_check();
+}
+
 #pragma mark - Private methods
 
 - (void)updateViewportRect
@@ -876,7 +886,7 @@ struct HideCursor {
         [self.observer onExitFullscreenWindow];
     };
 
-    m_web_view_bridge->on_theme_color_change = [weak_self](auto color) {
+    m_web_view_bridge->on_page_background_color_change = [weak_self](auto color) {
         LadybirdWebView* self = weak_self;
         if (self == nil) {
             return;
@@ -958,6 +968,7 @@ struct HideCursor {
     if (!m_metal_device) {
         CALayer* layer = [LadybirdWebViewContentLayer layer];
         layer.contentsGravity = kCAGravityTopLeft;
+        layer.backgroundColor = [Ladybird::gfx_color_to_ns_color(m_web_view_bridge->page_background_color()) CGColor];
         return layer;
     }
 
@@ -967,6 +978,7 @@ struct HideCursor {
     layer.framebufferOnly = YES;
     layer.displaySyncEnabled = YES;
     layer.contentsGravity = kCAGravityTopLeft;
+    layer.backgroundColor = [Ladybird::gfx_color_to_ns_color(m_web_view_bridge->page_background_color()) CGColor];
     return layer;
 }
 
@@ -1366,27 +1378,27 @@ struct HideCursor {
 
 - (void)onPinch:(NSMagnificationGestureRecognizer*)recognizer
 {
-    double scale_delta = 0;
     switch (recognizer.state) {
     case NSGestureRecognizerStateBegan:
-        m_web_view_bridge->pinch_state() = { .previous_scale = recognizer.magnification };
-        break;
+        recognizer.magnification = 0;
+        return;
     case NSGestureRecognizerStateChanged:
-        scale_delta = recognizer.magnification - m_web_view_bridge->pinch_state()->previous_scale;
-        m_web_view_bridge->pinch_state()->previous_scale = recognizer.magnification;
         break;
     case NSGestureRecognizerStateEnded:
     case NSGestureRecognizerStateCancelled:
-        scale_delta = recognizer.magnification - m_web_view_bridge->pinch_state()->previous_scale;
-        m_web_view_bridge->pinch_state() = {};
-        break;
+        recognizer.magnification = 0;
+        return;
     default:
         return;
     }
 
+    auto scale_delta = recognizer.magnification;
+    recognizer.magnification = 0;
+
     NSPoint point = [recognizer locationInView:self];
     Web::PinchEvent pinch_event;
     pinch_event.position = Ladybird::ns_point_to_gfx_point(point).to_type<Web::DevicePixels>() * m_web_view_bridge->device_pixel_ratio();
+    pinch_event.modifiers = Ladybird::ns_modifiers_to_key_modifiers([NSEvent modifierFlags]);
     pinch_event.scale_delta = scale_delta;
     m_web_view_bridge->enqueue_input_event(move(pinch_event));
 }

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Array.h>
 #include <AK/Badge.h>
 #include <AK/HashMap.h>
 #include <AK/HashTable.h>
@@ -42,6 +43,24 @@ enum class GlobalPrivacyControl {
     Yes,
 };
 
+enum class ConfigVariableID : u8 {
+    ShowWebContentProcessIDInTabTitle,
+    ContentBlockerListPaths,
+    Count,
+};
+
+struct ConfigVariableDefinition {
+    ConfigVariableID id;
+    StringView name;
+    StringView title;
+    StringView description;
+    JsonValue default_value;
+    Optional<JsonValue::Type> array_element_type;
+};
+
+WEBVIEW_API ReadonlySpan<ConfigVariableDefinition const> config_variable_definitions();
+WEBVIEW_API Optional<ConfigVariableID> config_variable_id_from_name(StringView);
+
 class WEBVIEW_API SettingsObserver {
 public:
     explicit SettingsObserver();
@@ -59,6 +78,7 @@ public:
     virtual void browsing_data_settings_changed() { }
     virtual void global_privacy_control_changed() { }
     virtual void dns_settings_changed() { }
+    virtual void config_variable_changed(ConfigVariableID) { }
 };
 
 class WEBVIEW_API Settings {
@@ -84,7 +104,7 @@ public:
     void set_languages(Vector<String>);
 
     static BrowsingBehavior parse_browsing_behavior(JsonValue const&);
-    BrowsingBehavior const& browsing_behavior() const { return m_browsing_behavior; }
+    BrowsingBehavior browsing_behavior() const;
     void set_browsing_behavior(BrowsingBehavior);
 
     Optional<SearchEngine> const& search_engine() const { return m_search_engine; }
@@ -114,6 +134,12 @@ public:
     DNSSettings const& dns_settings() const { return m_dns_settings; }
     void set_dns_settings(DNSSettings const&, bool override_by_command_line = false);
 
+    JsonValue const& config_variable(ConfigVariableID) const;
+    bool config_variable_as_bool(ConfigVariableID) const;
+    Vector<String> config_variable_as_string_array(ConfigVariableID) const;
+    void set_config_variable(ConfigVariableID, JsonValue);
+    void set_config_variable(StringView name, JsonValue const&);
+
     static void add_observer(Badge<SettingsObserver>, SettingsObserver&);
     static void remove_observer(Badge<SettingsObserver>, SettingsObserver&);
 
@@ -140,6 +166,7 @@ private:
     GlobalPrivacyControl m_global_privacy_control { GlobalPrivacyControl::No };
     DNSSettings m_dns_settings { SystemDNS() };
     bool m_dns_override_by_command_line { false };
+    Array<JsonValue, static_cast<size_t>(ConfigVariableID::Count)> m_config_variables {};
 
     Vector<SettingsObserver&> m_observers;
 };

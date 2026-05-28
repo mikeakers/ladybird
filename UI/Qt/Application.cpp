@@ -7,6 +7,7 @@
 #include <LibCore/ArgsParser.h>
 #include <LibWebView/URL.h>
 #include <UI/Qt/Application.h>
+#include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/EventLoopImplementationQt.h>
 #include <UI/Qt/Settings.h>
 #include <UI/Qt/StringUtils.h>
@@ -62,11 +63,13 @@ public:
     explicit LadybirdQApplication(Main::Arguments& arguments)
         : QApplication(arguments.argc, arguments.argv)
     {
+        update_chrome_style();
     }
 
     virtual bool event(QEvent* event) override
     {
         auto& application = static_cast<Application&>(WebView::Application::the());
+        auto const event_type = event->type();
 
 #if defined(AK_OS_WINDOWS)
         static Optional<NativeWindowsTimeChangeEventFilter> time_change_event_filter {};
@@ -76,7 +79,7 @@ public:
         }
 #endif
 
-        switch (event->type()) {
+        switch (event_type) {
         case QEvent::FileOpen: {
             if (!application.on_open_file)
                 break;
@@ -93,7 +96,17 @@ public:
             break;
         }
 
-        return QApplication::event(event);
+        auto handled = QApplication::event(event);
+        if (event_type == QEvent::ApplicationPaletteChange || event_type == QEvent::ThemeChange)
+            update_chrome_style();
+
+        return handled;
+    }
+
+private:
+    void update_chrome_style()
+    {
+        setStyleSheet(ChromeStyle::application_style_sheet(palette()));
     }
 };
 
@@ -199,13 +212,53 @@ void Application::display_error_dialog(StringView error_message) const
     QMessageBox::warning(active_tab(), "Ladybird", qstring_from_ak_string(error_message));
 }
 
-Utf16String Application::clipboard_text() const
+static QClipboard::Mode clipboard_mode(QClipboard const& clipboard, Application::ClipboardType type)
+{
+    switch (type) {
+    case WebView::Application::ClipboardType::Text:
+        return QClipboard::Clipboard;
+    case WebView::Application::ClipboardType::Selection:
+        return clipboard.supportsSelection() ? QClipboard::Selection : QClipboard::Clipboard;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+bool Application::supports_clipboard_type(ClipboardType type) const
 {
     if (browser_options().headless_mode.has_value())
-        return WebView::Application::clipboard_text();
+        return WebView::Application::supports_clipboard_type(type);
+
+    switch (type) {
+    case WebView::Application::ClipboardType::Text:
+        return true;
+    case WebView::Application::ClipboardType::Selection:
+        return QGuiApplication::clipboard()->supportsSelection();
+    }
+    VERIFY_NOT_REACHED();
+}
+
+Utf16String Application::clipboard_text(ClipboardType type) const
+{
+    if (browser_options().headless_mode.has_value())
+        return WebView::Application::clipboard_text(type);
 
     auto const* clipboard = QGuiApplication::clipboard();
-    return utf16_string_from_qstring(clipboard->text());
+    auto mode = clipboard_mode(*clipboard, type);
+
+    return utf16_string_from_qstring(clipboard->text(mode));
+}
+
+void Application::set_clipboard_text(String text, ClipboardType type)
+{
+    if (browser_options().headless_mode.has_value()) {
+        WebView::Application::set_clipboard_text(text, type);
+        return;
+    }
+
+    auto* clipboard = QGuiApplication::clipboard();
+    auto mode = clipboard_mode(*clipboard, type);
+
+    clipboard->setText(qstring_from_ak_string(text), mode);
 }
 
 Vector<Web::Clipboard::SystemClipboardRepresentation> Application::clipboard_entries() const

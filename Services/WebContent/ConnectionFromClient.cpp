@@ -10,17 +10,20 @@
  */
 
 #include <AK/Debug.h>
+#include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <AK/OwnPtr.h>
 #include <AK/QuickSort.h>
 #include <LibCore/System.h>
 #include <LibGC/Heap.h>
 #include <LibGfx/Bitmap.h>
+#include <LibGfx/Color.h>
 #include <LibGfx/Font/FontDatabase.h>
 #include <LibGfx/SystemTheme.h>
 #include <LibJS/Runtime/ConsoleObject.h>
 #include <LibJS/Runtime/Date.h>
 #include <LibUnicode/TimeZone.h>
+#include <LibWasm/Types.h>
 #include <LibWeb/ARIA/RoleType.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/CSS/ComputedProperties.h>
@@ -42,23 +45,28 @@
 #include <LibWeb/HTML/BroadcastChannel.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
+#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/SelectedFile.h>
 #include <LibWeb/HTML/Storage.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/HTML/WorkerAgentParent.h>
 #include <LibWeb/Infra/Strings.h>
+#include <LibWeb/Layout/FlexLayoutData.h>
+#include <LibWeb/Layout/GridLayoutData.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/Loader/ProxyMappings.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Loader/UserAgent.h>
 #include <LibWeb/Namespace.h>
+#include <LibWeb/Painting/FlexboxInspectorOverlay.h>
 #include <LibWeb/Painting/StackingContext.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/PermissionsPolicy/AutoplayAllowlist.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
-#include <LibWeb/Worker/WebWorkerClient.h>
 #include <LibWebView/Attribute.h>
 #include <LibWebView/ViewImplementation.h>
 #include <WebContent/CompositorConnection.h>
@@ -78,11 +86,11 @@ ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transpo
 
 ConnectionFromClient::~ConnectionFromClient() = default;
 
-CompositorConnection& ConnectionFromClient::compositor_process_connection() const
+CompositorConnection* ConnectionFromClient::compositor_process_connection() const
 {
-    VERIFY(m_compositor_connection);
-    VERIFY(m_compositor_connection->is_open());
-    return *m_compositor_connection;
+    if (!m_compositor_connection || !m_compositor_connection->is_open())
+        return nullptr;
+    return m_compositor_connection.ptr();
 }
 
 void ConnectionFromClient::did_destroy_compositor_context(Web::Compositor::CompositorContextId context_id)
@@ -136,8 +144,10 @@ Messages::WebContentServer::GetWindowHandleResponse ConnectionFromClient::get_wi
 
 void ConnectionFromClient::set_window_handle(u64 page_id, String handle)
 {
-    if (auto page = this->page(page_id); page.has_value())
+    if (auto page = this->page(page_id); page.has_value()) {
         page->page().top_level_traversable()->set_window_handle(move(handle));
+        page->send_current_needs_beforeunload_check();
+    }
 }
 
 void ConnectionFromClient::connect_to_webdriver(u64 page_id, ByteString webdriver_endpoint)
@@ -164,11 +174,6 @@ void ConnectionFromClient::connect_to_image_decoder(IPC::TransportHandle handle)
         on_image_decoder_connection(handle);
 }
 
-void ConnectionFromClient::connect_to_compositor(IPC::TransportHandle handle)
-{
-    m_page_host->attach_compositor_ui_client(move(handle));
-}
-
 void ConnectionFromClient::connect_to_compositor_process(IPC::TransportHandle handle)
 {
     auto transport = MUST(handle.create_transport());
@@ -176,6 +181,11 @@ void ConnectionFromClient::connect_to_compositor_process(IPC::TransportHandle ha
     m_compositor_connection->on_mouse_event = [this](u64 page_id, Web::MouseEvent event) {
         mouse_event(page_id, move(event));
     };
+}
+
+void ConnectionFromClient::compositor_process_reconnected()
+{
+    m_page_host->compositor_process_reconnected();
 }
 
 void ConnectionFromClient::connect_to_request_server(IPC::TransportHandle handle)
@@ -249,6 +259,12 @@ void ConnectionFromClient::key_event(u64 page_id, Web::KeyEvent event)
 
 void ConnectionFromClient::mouse_event(u64 page_id, Web::MouseEvent event)
 {
+    auto page = m_page_host->page(page_id);
+    if (!page.has_value()) {
+        async_did_finish_handling_input_event(page_id, Web::EventResult::Dropped);
+        return;
+    }
+
     // OPTIMIZATION: Coalesce consecutive unprocessed mouse move and wheel events.
     auto event_to_coalesce = [&]() -> Web::MouseEvent const* {
         if (m_input_event_queue.is_empty())
@@ -274,8 +290,7 @@ void ConnectionFromClient::mouse_event(u64 page_id, Web::MouseEvent event)
         m_input_event_queue.tail().event = move(event);
         ++m_input_event_queue.tail().coalesced_event_count;
 
-        if (auto page = this->page(page_id); page.has_value())
-            page->page().client().request_frame();
+        page->page().client().request_frame();
         return;
     }
 
@@ -295,10 +310,14 @@ void ConnectionFromClient::pinch_event(u64 page_id, Web::PinchEvent event)
 void ConnectionFromClient::enqueue_input_event(Web::QueuedInputEvent event)
 {
     auto page_id = event.page_id;
-    m_input_event_queue.enqueue(move(event));
+    auto page = m_page_host->page(page_id);
+    if (!page.has_value()) {
+        async_did_finish_handling_input_event(page_id, Web::EventResult::Dropped);
+        return;
+    }
 
-    if (auto page = this->page(page_id); page.has_value())
-        page->page().client().request_frame();
+    m_input_event_queue.enqueue(move(event));
+    page->page().client().request_frame();
 }
 
 void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteString argument)
@@ -414,6 +433,11 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString request, ByteSt
 
     if (request == "dump-all-css-errors") {
         Web::CSS::Parser::ErrorReporter::the().dump();
+        return;
+    }
+
+    if (request == "dump-wasm-stats") {
+        Wasm::dump_module_stats();
         return;
     }
 
@@ -618,6 +642,321 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
     async_did_inspect_dom_node(page_id, { property_type, move(serialized) });
 }
 
+static StringView grid_track_type_to_string(Web::Layout::GridTrackType type)
+{
+    switch (type) {
+    case Web::Layout::GridTrackType::Explicit:
+        return "explicit"sv;
+    case Web::Layout::GridTrackType::Implicit:
+        return "implicit"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static StringView grid_track_state_to_string(Web::Layout::GridTrackState state)
+{
+    switch (state) {
+    case Web::Layout::GridTrackState::Static:
+        return "static"sv;
+    case Web::Layout::GridTrackState::Repeat:
+        return "repeat"sv;
+    case Web::Layout::GridTrackState::Removed:
+        return "removed"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static JsonArray serialize_grid_line_names(Vector<String> const& names)
+{
+    JsonArray serialized_names;
+    for (auto const& name : names)
+        serialized_names.must_append(name);
+    return serialized_names;
+}
+
+static JsonObject serialize_grid_line(Web::Layout::GridLayoutLine const& line)
+{
+    JsonObject serialized_line;
+    serialized_line.set("breadth"sv, line.breadth.to_double());
+    serialized_line.set("names"sv, serialize_grid_line_names(line.names));
+    serialized_line.set("negativeNumber"sv, line.negative_number);
+    serialized_line.set("number"sv, line.number);
+    serialized_line.set("start"sv, line.start.to_double());
+    serialized_line.set("type"sv, grid_track_type_to_string(line.type));
+    return serialized_line;
+}
+
+static JsonObject serialize_grid_track(Web::Layout::GridLayoutTrack const& track)
+{
+    JsonObject serialized_track;
+    serialized_track.set("breadth"sv, track.breadth.to_double());
+    serialized_track.set("start"sv, track.start.to_double());
+    serialized_track.set("state"sv, grid_track_state_to_string(track.state));
+    serialized_track.set("type"sv, grid_track_type_to_string(track.type));
+    return serialized_track;
+}
+
+static JsonObject serialize_grid_area(Web::Layout::GridLayoutArea const& area)
+{
+    JsonObject serialized_area;
+    serialized_area.set("columnEnd"sv, area.column_end);
+    serialized_area.set("columnStart"sv, area.column_start);
+    serialized_area.set("name"sv, area.name);
+    serialized_area.set("rowEnd"sv, area.row_end);
+    serialized_area.set("rowStart"sv, area.row_start);
+    serialized_area.set("type"sv, grid_track_type_to_string(area.type));
+    return serialized_area;
+}
+
+static JsonObject serialize_grid_dimension(Web::Layout::GridLayoutDimension const& dimension)
+{
+    JsonArray lines;
+    for (auto const& line : dimension.lines)
+        lines.must_append(serialize_grid_line(line));
+
+    JsonArray tracks;
+    for (auto const& track : dimension.tracks)
+        tracks.must_append(serialize_grid_track(track));
+
+    JsonObject serialized_dimension;
+    serialized_dimension.set("lines"sv, move(lines));
+    serialized_dimension.set("tracks"sv, move(tracks));
+    return serialized_dimension;
+}
+
+static JsonObject serialize_grid_fragment(Web::Layout::GridLayoutFragment const& fragment)
+{
+    JsonArray areas;
+    for (auto const& area : fragment.areas)
+        areas.must_append(serialize_grid_area(area));
+
+    JsonObject serialized_fragment;
+    serialized_fragment.set("areas"sv, move(areas));
+    serialized_fragment.set("cols"sv, serialize_grid_dimension(fragment.columns));
+    serialized_fragment.set("rows"sv, serialize_grid_dimension(fragment.rows));
+    return serialized_fragment;
+}
+
+static JsonArray serialize_grid_fragments(Vector<Web::Layout::GridLayoutFragment> const& fragments)
+{
+    JsonArray serialized_fragments;
+    for (auto const& fragment : fragments)
+        serialized_fragments.must_append(serialize_grid_fragment(fragment));
+    return serialized_fragments;
+}
+
+static StringView flex_layout_growth_state_to_string(Web::Layout::FlexLayoutGrowthState state)
+{
+    switch (state) {
+    case Web::Layout::FlexLayoutGrowthState::Growing:
+        return "growing"sv;
+    case Web::Layout::FlexLayoutGrowthState::Shrinking:
+        return "shrinking"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static StringView flex_layout_clamp_state_to_string(Web::Layout::FlexLayoutClampState state)
+{
+    switch (state) {
+    case Web::Layout::FlexLayoutClampState::Unclamped:
+        return "unclamped"sv;
+    case Web::Layout::FlexLayoutClampState::ClampedToMin:
+        return "clamped_to_min"sv;
+    case Web::Layout::FlexLayoutClampState::ClampedToMax:
+        return "clamped_to_max"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+static JsonObject serialize_flex_layout_item(Web::Layout::FlexLayoutItem const& item, Web::Layout::FlexLayoutGrowthState line_growth_state)
+{
+    JsonObject sizing;
+    sizing.set("clampState"sv, flex_layout_clamp_state_to_string(item.clamp_state));
+    sizing.set("crossAxisDirection"sv, item.cross_axis_direction);
+    sizing.set("crossMaxSize"sv, item.cross_max_size.to_double());
+    sizing.set("crossMinSize"sv, item.cross_min_size.to_double());
+    sizing.set("lineGrowthState"sv, flex_layout_growth_state_to_string(line_growth_state));
+    sizing.set("mainAxisDirection"sv, item.main_axis_direction);
+    sizing.set("mainBaseSize"sv, item.main_base_size.to_double());
+    sizing.set("mainDeltaSize"sv, item.main_delta_size.to_double());
+    sizing.set("mainMaxSize"sv, item.main_max_size.to_double());
+    sizing.set("mainMinSize"sv, item.main_min_size.to_double());
+
+    auto main_size_property_name = item.main_axis_direction.starts_with_bytes("horizontal"sv) ? "width"sv : "height"sv;
+
+    JsonObject properties;
+    properties.set("flex-basis"sv, item.flex_basis);
+    properties.set("flex-grow"sv, item.flex_grow);
+    properties.set("flex-shrink"sv, item.flex_shrink);
+    properties.set(main_size_property_name, item.main_size_property);
+    properties.set(MUST(String::formatted("min-{}", main_size_property_name)), item.main_min_size_property);
+    properties.set(MUST(String::formatted("max-{}", main_size_property_name)), item.main_max_size_property);
+
+    JsonObject computed_style;
+    computed_style.set("flexGrow"sv, item.flex_grow);
+    computed_style.set("flexShrink"sv, item.flex_shrink);
+
+    JsonObject serialized_item;
+    serialized_item.set("nodeId"sv, item.node_id->value());
+    serialized_item.set("flexItemSizing"sv, move(sizing));
+    serialized_item.set("properties"sv, move(properties));
+    serialized_item.set("computedStyle"sv, move(computed_style));
+    return serialized_item;
+}
+
+static JsonArray serialize_flex_layout_items(Vector<Web::Layout::FlexLayoutLine> const& lines)
+{
+    JsonArray serialized_items;
+    for (auto const& line : lines) {
+        for (auto const& item : line.items) {
+            if (!item.node_id.has_value())
+                continue;
+            serialized_items.must_append(serialize_flex_layout_item(item, line.growth_state));
+        }
+    }
+    return serialized_items;
+}
+
+static Optional<JsonObject> flex_layout_for_node(Web::DOM::Node const& node)
+{
+    auto paintable_box = node.paintable_box();
+    if (!paintable_box)
+        return {};
+
+    auto const* flex_layout_data = paintable_box->flex_layout_data();
+    if (!flex_layout_data)
+        return {};
+
+    JsonObject properties;
+    properties.set("align-content"sv, Web::CSS::to_string(flex_layout_data->align_content));
+    properties.set("align-items"sv, Web::CSS::to_string(flex_layout_data->align_items));
+    properties.set("flex-direction"sv, Web::CSS::to_string(flex_layout_data->flex_direction));
+    properties.set("flex-wrap"sv, Web::CSS::to_string(flex_layout_data->flex_wrap));
+    properties.set("justify-content"sv, Web::CSS::to_string(flex_layout_data->justify_content));
+
+    JsonObject layout;
+    layout.set("containerNodeId"sv, node.unique_id().value());
+    layout.set("properties"sv, move(properties));
+    layout.set("items"sv, serialize_flex_layout_items(flex_layout_data->lines));
+    return layout;
+}
+
+static Optional<JsonObject> grid_layout_for_node(Web::DOM::Node const& node)
+{
+    auto paintable_box = node.paintable_box();
+    if (!paintable_box)
+        return {};
+
+    auto const* grid_layout_data = paintable_box->grid_layout_data();
+    if (!grid_layout_data)
+        return {};
+
+    JsonObject layout;
+    layout.set("containerNodeId"sv, node.unique_id().value());
+    layout.set("direction"sv, Web::CSS::to_string(grid_layout_data->direction));
+    layout.set("gridFragments"sv, serialize_grid_fragments(grid_layout_data->fragments));
+    layout.set("isSubgrid"sv, grid_layout_data->is_subgrid);
+    layout.set("writingMode"sv, Web::CSS::to_string(grid_layout_data->writing_mode));
+
+    return layout;
+}
+
+static void append_grid_layouts_for_node_and_frame_descendants(Web::DOM::Node& root_node, JsonArray& grid_layouts)
+{
+    root_node.for_each_in_inclusive_subtree([&](Web::DOM::Node& node) {
+        if (auto grid_layout = grid_layout_for_node(node); grid_layout.has_value())
+            grid_layouts.must_append(grid_layout.release_value());
+
+        auto* navigable_container = as_if<Web::HTML::NavigableContainer>(node);
+        if (!navigable_container)
+            return Web::TraversalDecision::Continue;
+
+        auto content_navigable = navigable_container->content_navigable();
+        if (!content_navigable)
+            return Web::TraversalDecision::Continue;
+
+        auto content_document = content_navigable->active_document();
+        if (!content_document)
+            return Web::TraversalDecision::Continue;
+
+        if (!content_document->origin().is_same_origin_domain(navigable_container->document().origin()))
+            return Web::TraversalDecision::Continue;
+
+        content_document->update_layout(Web::DOM::UpdateLayoutReason::InspectGridLayout);
+        append_grid_layouts_for_node_and_frame_descendants(*content_document, grid_layouts);
+        return Web::TraversalDecision::Continue;
+    });
+}
+
+void ConnectionFromClient::inspect_grid_layouts(u64 page_id, Web::UniqueNodeID root_node_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* root_node = Web::DOM::Node::from_unique_id(root_node_id);
+    if (!root_node) {
+        async_did_inspect_grid_layouts(page_id, "[]"_string);
+        return;
+    }
+
+    root_node->document().update_layout(Web::DOM::UpdateLayoutReason::InspectGridLayout);
+
+    JsonArray grid_layouts;
+    append_grid_layouts_for_node_and_frame_descendants(*root_node, grid_layouts);
+
+    async_did_inspect_grid_layouts(page_id, grid_layouts.serialized());
+}
+
+void ConnectionFromClient::inspect_current_grid(u64 page_id, Web::UniqueNodeID node_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* node = Web::DOM::Node::from_unique_id(node_id);
+    if (!node) {
+        async_did_inspect_current_grid(page_id, "null"_string);
+        return;
+    }
+
+    node->document().update_layout(Web::DOM::UpdateLayoutReason::InspectGridLayout);
+
+    for (auto const* current = node; current; current = current->parent_or_shadow_host_node()) {
+        if (auto grid_layout = grid_layout_for_node(*current); grid_layout.has_value()) {
+            async_did_inspect_current_grid(page_id, grid_layout->serialized());
+            return;
+        }
+    }
+
+    async_did_inspect_current_grid(page_id, "null"_string);
+}
+
+void ConnectionFromClient::inspect_current_flexbox(u64 page_id, Web::UniqueNodeID node_id, bool only_look_at_parents)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* node = Web::DOM::Node::from_unique_id(node_id);
+    if (!node) {
+        async_did_inspect_current_flexbox(page_id, "null"_string);
+        return;
+    }
+
+    node->document().update_layout(Web::DOM::UpdateLayoutReason::InspectFlexboxLayout);
+
+    for (auto const* current = only_look_at_parents ? node->parent_or_shadow_host_node() : node; current; current = current->parent_or_shadow_host_node()) {
+        if (auto flex_layout = flex_layout_for_node(*current); flex_layout.has_value()) {
+            async_did_inspect_current_flexbox(page_id, flex_layout->serialized());
+            return;
+        }
+    }
+
+    async_did_inspect_current_flexbox(page_id, "null"_string);
+}
+
 void ConnectionFromClient::clear_inspected_dom_node(u64 page_id)
 {
     auto page = this->page(page_id);
@@ -648,6 +987,108 @@ void ConnectionFromClient::highlight_dom_node(u64 page_id, Web::UniqueNodeID nod
         return;
 
     node->document().set_highlighted_node(node, pseudo_element);
+}
+
+static Web::Painting::FlexboxInspectorOverlayOptions flexbox_inspector_overlay_options_from_json(JsonValue const& options)
+{
+    Web::Painting::FlexboxInspectorOverlayOptions result;
+
+    if (options.is_object()) {
+        auto const& object = options.as_object();
+        if (auto color = object.get_string("color"sv); color.has_value()) {
+            if (auto parsed_color = Gfx::Color::from_string(*color); parsed_color.has_value())
+                result.color = *parsed_color;
+        }
+    }
+
+    return result;
+}
+
+static Web::Painting::GridInspectorOverlayOptions grid_inspector_overlay_options_from_json(JsonValue const& options)
+{
+    Web::Painting::GridInspectorOverlayOptions result;
+
+    if (options.is_object()) {
+        auto const& object = options.as_object();
+        if (auto color = object.get_string("color"sv); color.has_value()) {
+            if (auto parsed_color = Gfx::Color::from_string(*color); parsed_color.has_value())
+                result.color = *parsed_color;
+        }
+
+        result.show_area_names = object.get_bool("showGridAreasOverlay"sv).value_or(result.show_area_names);
+        result.show_line_numbers = object.get_bool("showGridLineNumbers"sv).value_or(result.show_line_numbers);
+        result.show_infinite_lines = object.get_bool("showInfiniteLines"sv).value_or(result.show_infinite_lines);
+        result.show_track_sizes = object.get_bool("showGridTrackSizes"sv)
+                                      .value_or(object.get_bool("showGridTrackSizeLabels"sv)
+                                              .value_or(object.get_bool("showTrackSizes"sv)
+                                                      .value_or(result.show_track_sizes)));
+    }
+
+    return result;
+}
+
+void ConnectionFromClient::highlight_flexbox(u64 page_id, Web::UniqueNodeID node_id, JsonValue options)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* node = Web::DOM::Node::from_unique_id(node_id);
+    if (!node || !node->layout_node())
+        return;
+
+    node->document().set_flexbox_highlighted_node(node, flexbox_inspector_overlay_options_from_json(options));
+}
+
+void ConnectionFromClient::clear_flexbox_highlight(u64 page_id, Web::UniqueNodeID node_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    if (node_id != 0) {
+        auto* node = Web::DOM::Node::from_unique_id(node_id);
+        if (node)
+            node->document().clear_flexbox_highlighted_node(node);
+        return;
+    }
+
+    for (auto& navigable : Web::HTML::all_navigables()) {
+        if (navigable->active_document())
+            navigable->active_document()->clear_flexbox_highlighted_node(nullptr);
+    }
+}
+
+void ConnectionFromClient::highlight_grid(u64 page_id, Web::UniqueNodeID node_id, JsonValue options)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    auto* node = Web::DOM::Node::from_unique_id(node_id);
+    if (!node || !node->layout_node())
+        return;
+
+    node->document().set_grid_highlighted_node(node, grid_inspector_overlay_options_from_json(options));
+}
+
+void ConnectionFromClient::clear_grid_highlight(u64 page_id, Web::UniqueNodeID node_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+
+    if (node_id != 0) {
+        auto* node = Web::DOM::Node::from_unique_id(node_id);
+        if (node)
+            node->document().clear_grid_highlighted_node(node);
+        return;
+    }
+
+    for (auto& navigable : Web::HTML::all_navigables()) {
+        if (navigable->active_document())
+            navigable->active_document()->clear_grid_highlighted_node(nullptr);
+    }
 }
 
 void ConnectionFromClient::inspect_accessibility_tree(u64 page_id)
@@ -702,6 +1143,8 @@ void ConnectionFromClient::set_listen_for_dom_mutations(u64 page_id, bool listen
         return;
 
     page->page().set_listen_for_dom_mutations(listen_for_dom_mutations);
+    if (!listen_for_dom_mutations)
+        page->clear_pending_dom_mutations();
 }
 
 void ConnectionFromClient::did_connect_devtools_client(u64 page_id)
@@ -1167,33 +1610,15 @@ void ConnectionFromClient::paste(u64 page_id, Utf16String text)
         page->page().focused_navigable().paste(text);
 }
 
-static ErrorOr<Vector<String>> parse_content_blocker_patterns(Core::AnonymousBuffer const& patterns_buffer)
-{
-    Vector<String> patterns;
-
-    for (auto line : StringView { patterns_buffer.bytes() }.split_view('\n', SplitBehavior::Nothing)) {
-        if (line.ends_with('\r'))
-            line = line.substring_view(0, line.length() - 1);
-        if (line.is_empty())
-            continue;
-
-        patterns.append(TRY(String::from_utf8(line)));
-    }
-
-    return patterns;
-}
-
 void ConnectionFromClient::set_content_blockers(u64 page_id, Core::AnonymousBuffer patterns_buffer)
 {
-    auto patterns_or_error = parse_content_blocker_patterns(patterns_buffer);
-    if (patterns_or_error.is_error()) {
-        dbgln("Failed to set content blockers: {}", patterns_or_error.error());
-        return;
-    }
-
     auto& blocker = Web::ContentBlocker::the();
     auto had_cosmetic_rules = blocker.has_cosmetic_rules();
-    blocker.set_patterns(patterns_or_error.value()).release_value_but_fixme_should_propagate_errors();
+    auto result = blocker.set_rules_from_bytes(patterns_buffer.bytes());
+    if (result.is_error()) {
+        dbgln("Failed to set content blockers: {}", result.error());
+        return;
+    }
 
     if (had_cosmetic_rules || blocker.has_cosmetic_rules()) {
         if (auto page = this->page(page_id); page.has_value())
@@ -1474,12 +1899,26 @@ void ConnectionFromClient::cookies_changed(u64 page_id, Vector<HTTP::Cookie::Coo
 void ConnectionFromClient::broadcast_channel_message(Web::HTML::BroadcastChannelMessage message)
 {
     Web::HTML::BroadcastChannel::deliver_message_locally(message);
-    Web::HTML::WebWorkerClient::for_each_client([&](auto& client) {
-        if (client.pid() == message.source_process_id)
-            return IterationDecision::Continue;
-        client.async_broadcast_channel_message(message);
-        return IterationDecision::Continue;
-    });
+}
+
+void ConnectionFromClient::did_worker_agent_finish_loading_script(Web::HTML::WorkerAgentOwnerToken owner_token)
+{
+    Web::HTML::WorkerAgentParent::did_finish_loading_worker_script(owner_token);
+}
+
+void ConnectionFromClient::did_worker_agent_fail_loading_script(Web::HTML::WorkerAgentOwnerToken owner_token)
+{
+    Web::HTML::WorkerAgentParent::did_fail_loading_worker_script(owner_token);
+}
+
+void ConnectionFromClient::did_worker_agent_report_exception(Web::HTML::WorkerAgentOwnerToken owner_token, String message, String filename, u32 lineno, u32 colno)
+{
+    Web::HTML::WorkerAgentParent::did_report_worker_exception(owner_token, move(message), move(filename), lineno, colno);
+}
+
+void ConnectionFromClient::did_worker_agent_close(Web::HTML::WorkerAgentOwnerToken owner_token)
+{
+    Web::HTML::WorkerAgentParent::did_close_worker(owner_token);
 }
 
 // https://html.spec.whatwg.org/multipage/speculative-loading.html#nav-traversal-ui:close-a-top-level-traversable

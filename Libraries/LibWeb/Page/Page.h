@@ -44,6 +44,7 @@
 #include <LibWeb/HTML/SelectItem.h>
 #include <LibWeb/HTML/TokenizedFeatures.h>
 #include <LibWeb/HTML/WebViewHints.h>
+#include <LibWeb/HTML/WorkerAgentForward.h>
 #include <LibWeb/Loader/FileRequest.h>
 #include <LibWeb/Page/EventResult.h>
 #include <LibWeb/Page/InputEvent.h>
@@ -120,7 +121,7 @@ public:
     EventResult handle_mousewheel(DevicePixelPoint, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, double wheel_delta_x, double wheel_delta_y, bool async_scroll_performed_default_action = false, Optional<AsyncScrollOperation>* async_scroll_operation = nullptr);
 
     EventResult handle_drag_and_drop_event(DragEvent::Type, DevicePixelPoint, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, Vector<HTML::SelectedFile> files);
-    EventResult handle_pinch_event(DevicePixelPoint point, double scale);
+    EventResult handle_pinch_event(DevicePixelPoint point, unsigned modifiers, double scale);
 
     EventResult handle_keydown(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
     EventResult handle_keyup(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
@@ -131,6 +132,7 @@ public:
     CSSPixelRect web_exposed_screen_area() const;
     CSSPixelRect web_exposed_available_screen_area() const;
     CSS::PreferredColorScheme preferred_color_scheme() const;
+    void set_preferred_color_scheme_override_for_testing(Optional<CSS::PreferredColorScheme> color_scheme) { m_preferred_color_scheme_override_for_testing = color_scheme; }
     CSS::PreferredContrast preferred_contrast() const;
     CSS::PreferredMotion preferred_motion() const;
 
@@ -150,6 +152,8 @@ public:
     void set_async_scrolling_enabled(bool b) { m_async_scrolling_enabled = b; }
     u64 wheel_event_listener_state_generation() const { return m_wheel_event_listener_state_generation; }
     void invalidate_compositor_wheel_event_listener_state();
+    bool needs_beforeunload_check() const { return m_needs_beforeunload_check; }
+    void update_needs_beforeunload_check();
 
     bool is_webdriver_active() const { return m_is_webdriver_active; }
     void set_is_webdriver_active(bool b) { m_is_webdriver_active = b; }
@@ -222,6 +226,7 @@ public:
     void unregister_canvas_element(Badge<HTML::HTMLCanvasElement>, UniqueNodeID canvas_id);
 
     void present_all_canvas_element_surfaces();
+    void republish_all_canvas_element_surfaces();
 
     struct MediaContextMenu {
         URL::URL media_url;
@@ -319,6 +324,7 @@ private:
     bool m_enable_primary_paste { true };
     bool m_async_scrolling_enabled { false };
     u64 m_wheel_event_listener_state_generation { 0 };
+    bool m_needs_beforeunload_check { true };
 
     // https://w3c.github.io/webdriver/#dfn-webdriver-active-flag
     // The webdriver-active flag is set to true when the user agent is under remote control. It is initially false.
@@ -355,16 +361,17 @@ private:
     Optional<String> m_user_style_sheet_source;
 
     // https://html.spec.whatwg.org/multipage/system-state.html#pdf-viewer-supported
-    // Each user agent has a PDF viewer supported boolean, whose value is implementation-defined (and might vary according to user preferences).
-    // Spec Note: This value also impacts the navigation processing model.
-    // FIXME: Actually support pdf viewing
-    bool m_pdf_viewer_supported { false };
+    // Each user agent has a PDF viewer supported boolean, whose value is implementation-defined (and might vary
+    // according to user preferences).
+    // NOTE: This value also impacts the navigation processing model.
+    bool m_pdf_viewer_supported { true };
 
     size_t m_find_in_page_match_index { 0 };
     Optional<FindInPageQuery> m_last_find_in_page_query;
     URL::URL m_last_find_in_page_url;
 
     bool m_listen_for_dom_mutations { false };
+    Optional<CSS::PreferredColorScheme> m_preferred_color_scheme_override_for_testing;
 
     struct PendingFullscreenEnter {
         GC::Ref<DOM::Element> element;
@@ -486,6 +493,7 @@ public:
     virtual void page_did_request_activate_tab() { }
     virtual void page_did_close_top_level_traversable() { }
     virtual void page_did_update_navigation_buttons_state([[maybe_unused]] bool back_enabled, [[maybe_unused]] bool forward_enabled) { }
+    virtual void page_did_change_needs_beforeunload_check([[maybe_unused]] bool needs_beforeunload_check) { }
 
     virtual void request_file(FileRequest) = 0;
 
@@ -503,10 +511,12 @@ public:
     virtual void page_did_set_device_pixel_ratio_for_testing([[maybe_unused]] double ratio) { }
 
     virtual void page_did_change_theme_color(Gfx::Color) { }
+    virtual void page_did_change_background_color(Gfx::Color) { }
 
     virtual void page_did_insert_clipboard_entry(Clipboard::SystemClipboardRepresentation const&, [[maybe_unused]] StringView presentation_style) { }
     virtual void page_did_request_clipboard_entries([[maybe_unused]] u64 request_id) { }
-    virtual void page_did_request_paste() { }
+    virtual void page_did_request_primary_paste() { }
+    virtual void page_did_update_primary_selection(String const&) { }
 
     virtual void page_did_change_audio_play_state(HTML::AudioPlayState) { }
 
@@ -517,14 +527,11 @@ public:
     virtual void page_did_report_worker_exception([[maybe_unused]] String const& message, [[maybe_unused]] String const& filename, [[maybe_unused]] u32 lineno, [[maybe_unused]] u32 colno) { }
     virtual void page_did_post_broadcast_channel_message([[maybe_unused]] HTML::BroadcastChannelMessage const& message) { }
 
-    struct WorkerAgentResponse {
-        IPC::TransportHandle worker_handle;
-        IPC::TransportHandle request_server_handle;
-        IPC::TransportHandle image_decoder_handle;
-    };
-    virtual WorkerAgentResponse request_worker_agent([[maybe_unused]] Web::Bindings::AgentType worker_type) { return {}; }
+    virtual HTML::WorkerAgentId start_worker_agent([[maybe_unused]] HTML::WorkerAgentStartRequest&& request) { return {}; }
+    virtual void close_worker_agent([[maybe_unused]] HTML::WorkerAgentId agent_id, [[maybe_unused]] HTML::WorkerAgentOwnerToken owner_token) { }
 
     virtual void page_did_mutate_dom([[maybe_unused]] FlyString const& type, [[maybe_unused]] DOM::Node const& target, [[maybe_unused]] DOM::NodeList& added_nodes, [[maybe_unused]] DOM::NodeList& removed_nodes, [[maybe_unused]] GC::Ptr<DOM::Node> previous_sibling, [[maybe_unused]] GC::Ptr<DOM::Node> next_sibling, [[maybe_unused]] Optional<String> const& attribute_name) { }
+    virtual void flush_pending_dom_mutations() { }
 
     virtual void page_did_take_screenshot(Gfx::ShareableBitmap const&) { }
 

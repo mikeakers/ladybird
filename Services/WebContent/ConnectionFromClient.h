@@ -9,6 +9,7 @@
 #pragma once
 
 #include <AK/HashMap.h>
+#include <AK/JsonValue.h>
 #include <AK/Queue.h>
 #include <AK/RefPtr.h>
 #include <AK/SourceLocation.h>
@@ -21,6 +22,7 @@
 #include <LibWeb/CSS/PreferredMotion.h>
 #include <LibWeb/Compositor/Types.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/HTML/WorkerAgentTypes.h>
 #include <LibWeb/Loader/FileRequest.h>
 #include <LibWeb/Page/EventResult.h>
 #include <LibWeb/Page/InputEvent.h>
@@ -49,7 +51,7 @@ public:
 
     PageHost& page_host() { return *m_page_host; }
     PageHost const& page_host() const { return *m_page_host; }
-    CompositorConnection& compositor_process_connection() const;
+    CompositorConnection* compositor_process_connection() const;
     void did_destroy_compositor_context(Web::Compositor::CompositorContextId);
 
     Function<void(IPC::TransportHandle const&)> on_request_server_connection;
@@ -71,8 +73,8 @@ private:
     virtual void connect_to_web_ui(u64 page_id, IPC::TransportHandle handle) override;
     virtual void connect_to_request_server(IPC::TransportHandle handle) override;
     virtual void connect_to_image_decoder(IPC::TransportHandle handle) override;
-    virtual void connect_to_compositor(IPC::TransportHandle handle) override;
     virtual void connect_to_compositor_process(IPC::TransportHandle handle) override;
+    virtual void compositor_process_reconnected() override;
     virtual void update_system_theme(u64 page_id, Core::AnonymousBuffer) override;
     virtual void update_screen_rects(u64 page_id, Vector<Web::DevicePixelRect>, u32) override;
     virtual void load_url(u64 page_id, URL::URL) override;
@@ -89,8 +91,15 @@ private:
     virtual void get_source(u64 page_id) override;
     virtual void inspect_dom_tree(u64 page_id) override;
     virtual void inspect_dom_node(u64 page_id, WebView::DOMNodeProperties::Type, Web::UniqueNodeID node_id, Optional<Web::CSS::PseudoElement> pseudo_element) override;
+    virtual void inspect_grid_layouts(u64 page_id, Web::UniqueNodeID root_node_id) override;
+    virtual void inspect_current_grid(u64 page_id, Web::UniqueNodeID node_id) override;
+    virtual void inspect_current_flexbox(u64 page_id, Web::UniqueNodeID node_id, bool only_look_at_parents) override;
     virtual void clear_inspected_dom_node(u64 page_id) override;
     virtual void highlight_dom_node(u64 page_id, Web::UniqueNodeID node_id, Optional<Web::CSS::PseudoElement> pseudo_element) override;
+    virtual void highlight_flexbox(u64 page_id, Web::UniqueNodeID node_id, JsonValue options) override;
+    virtual void clear_flexbox_highlight(u64 page_id, Web::UniqueNodeID node_id) override;
+    virtual void highlight_grid(u64 page_id, Web::UniqueNodeID node_id, JsonValue options) override;
+    virtual void clear_grid_highlight(u64 page_id, Web::UniqueNodeID node_id) override;
     virtual void inspect_accessibility_tree(u64 page_id) override;
     virtual void get_hovered_node_id(u64 page_id) override;
 
@@ -177,6 +186,10 @@ private:
     virtual void set_document_cookie_version_index(u64 page_id, i64 document_id, Core::SharedVersionIndex document_index) override;
     virtual void cookies_changed(u64 page_id, Vector<HTTP::Cookie::Cookie>) override;
     virtual void broadcast_channel_message(Web::HTML::BroadcastChannelMessage message) override;
+    virtual void did_worker_agent_finish_loading_script(Web::HTML::WorkerAgentOwnerToken owner_token) override;
+    virtual void did_worker_agent_fail_loading_script(Web::HTML::WorkerAgentOwnerToken owner_token) override;
+    virtual void did_worker_agent_report_exception(Web::HTML::WorkerAgentOwnerToken owner_token, String message, String filename, u32 lineno, u32 colno) override;
+    virtual void did_worker_agent_close(Web::HTML::WorkerAgentOwnerToken owner_token) override;
 
     virtual void request_close(u64 page_id) override;
 

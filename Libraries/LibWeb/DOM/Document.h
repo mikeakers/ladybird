@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <AK/FlyString.h>
 #include <AK/Function.h>
 #include <AK/HashMap.h>
 #include <AK/HashTable.h>
@@ -29,6 +30,7 @@
 #include <LibWeb/Bindings/NavigationType.h>
 #include <LibWeb/CSS/CustomPropertyRegistration.h>
 #include <LibWeb/CSS/EnvironmentVariable.h>
+#include <LibWeb/CSS/PreferredColorScheme.h>
 #include <LibWeb/CSS/StyleScope.h>
 #include <LibWeb/DOM/AnchorNameMap.h>
 #include <LibWeb/DOM/HoverEventData.h>
@@ -45,6 +47,8 @@
 #include <LibWeb/HTML/SessionHistoryEntry.h>
 #include <LibWeb/HTML/VisibilityState.h>
 #include <LibWeb/InvalidateDisplayList.h>
+#include <LibWeb/Painting/FlexboxInspectorOverlay.h>
+#include <LibWeb/Painting/GridInspectorOverlay.h>
 #include <LibWeb/ResizeObserver/ResizeObserver.h>
 #include <LibWeb/TrustedTypes/InjectionSink.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
@@ -118,6 +122,8 @@ enum class InvalidateLayoutTreeReason {
     X(HTMLLabelElementActivationBehavior)    \
     X(HostedDocumentBeforePaint)             \
     X(InspectDOMTree)                        \
+    X(InspectFlexboxLayout)                  \
+    X(InspectGridLayout)                     \
     X(InternalsHitTest)                      \
     X(MediaQueryListMatches)                 \
     X(NavigableSelectedText)                 \
@@ -303,6 +309,10 @@ public:
     GC::Ptr<Node const> highlighted_node() const { return m_highlighted_node; }
     GC::Ptr<Layout::Node> highlighted_layout_node();
     GC::Ptr<Layout::Node const> highlighted_layout_node() const { return const_cast<Document*>(this)->highlighted_layout_node(); }
+    void set_flexbox_highlighted_node(GC::Ptr<Node>, Painting::FlexboxInspectorOverlayOptions);
+    void clear_flexbox_highlighted_node(GC::Ptr<Node>);
+    void set_grid_highlighted_node(GC::Ptr<Node>, Painting::GridInspectorOverlayOptions);
+    void clear_grid_highlighted_node(GC::Ptr<Node>);
 
     Element* document_element();
     Element const* document_element() const;
@@ -353,6 +363,8 @@ public:
     Page const& page() const;
 
     Color background_color() const;
+    Color canvas_background_color() const;
+    CSS::PreferredColorScheme canvas_color_scheme() const;
     Vector<CSS::BackgroundLayerData> const* background_layers() const;
     CSS::ImageRendering background_image_rendering() const;
 
@@ -366,11 +378,14 @@ public:
     void set_visited_link_color(Color);
 
     Optional<Vector<String> const&> supported_color_schemes() const;
+    void set_supported_color_schemes(Vector<String>);
+    void set_supported_color_schemes(Optional<Vector<String>>);
     void obtain_supported_color_schemes();
 
     void obtain_theme_color();
 
     void update_style();
+    void invalidate_style_for_viewport_change();
     void update_style_if_needed_for_element(AbstractElement const&);
     enum class StyleUpdateMode : u8 {
         Normal,
@@ -869,6 +884,7 @@ public:
         u64 has_ancestor_walk_visits { 0 };
         u64 has_ancestor_sibling_element_checks { 0 };
         u64 has_invalidation_metadata_candidates { 0 };
+        u64 has_invalidation_rule_cache_builds { 0 };
         u64 has_match_invocations { 0 };
         u64 has_result_cache_hits { 0 };
         u64 has_result_cache_misses { 0 };
@@ -1096,6 +1112,9 @@ public:
 
     CSS::StyleScope const& style_scope() const { return m_style_scope; }
     CSS::StyleScope& style_scope() { return m_style_scope; }
+    String const& content_blocker_style_sheet();
+    void invalidate_content_blocker_style_sheet();
+    bool content_blocker_style_sheet_may_need_refresh_for_class_or_id(FlyString const* id, ReadonlySpan<FlyString> class_names);
 
     void exit_pointer_lock();
 
@@ -1194,6 +1213,19 @@ private:
     GC::Ptr<Node> m_highlighted_node;
     Optional<CSS::PseudoElement> m_highlighted_pseudo_element;
 
+    struct GridHighlight {
+        GC::Ptr<Node> node;
+        Painting::GridInspectorOverlayOptions options;
+    };
+
+    struct FlexboxHighlight {
+        GC::Ptr<Node> node;
+        Painting::FlexboxInspectorOverlayOptions options;
+    };
+
+    Vector<FlexboxHighlight> m_flexbox_highlights;
+    Vector<GridHighlight> m_grid_highlights;
+
     Optional<Color> m_normal_link_color;
     Optional<Color> m_active_link_color;
     Optional<Color> m_visited_link_color;
@@ -1204,7 +1236,7 @@ private:
     bool m_active_parser_was_aborted { false };
 
     bool m_has_been_destroyed { false };
-    bool m_has_fired_document_became_inactive { false };
+    bool m_observers_consider_document_fully_active { false };
 
     String m_source;
 
@@ -1397,7 +1429,7 @@ private:
     GC::Ptr<CSS::VisualViewport> m_visual_viewport;
 
     // NOTE: Not in the spec per se, but Document must be able to access all IntersectionObservers whose root is in the document.
-    IGNORE_GC OrderedHashTable<GC::Ref<IntersectionObserver::IntersectionObserver>> m_intersection_observers;
+    GC::WeakHashSet<IntersectionObserver::IntersectionObserver> m_intersection_observers;
 
     // https://www.w3.org/TR/intersection-observer/#document-intersectionobservertaskqueued
     // Each document has an IntersectionObserverTaskQueued flag which is initialized to false.
@@ -1464,6 +1496,11 @@ private:
     // Document should not visit ShadowRoot list to avoid leaks.
     // It's responsibility of object that allocated ShadowRoot to keep it alive.
     ShadowRoot::DocumentShadowRootList m_shadow_roots;
+
+    Optional<String> m_content_blocker_style_sheet;
+    // Class/id tokens already covered by the cached content blocker stylesheet.
+    HashTable<FlyString> m_content_blocker_style_sheet_checked_classes;
+    HashTable<FlyString> m_content_blocker_style_sheet_checked_ids;
 
     Optional<AK::UnixDateTime> m_last_modified;
 

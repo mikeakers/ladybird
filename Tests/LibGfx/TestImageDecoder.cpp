@@ -121,6 +121,15 @@ TEST_CASE(test_ico_malformed_frame)
     }
 }
 
+TEST_CASE(test_ico_selects_largest_image_with_same_bpp)
+{
+    auto input = TEST_INPUT("ico/multiple-sizes-with-same-bpp.ico"sv);
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(input));
+
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::ICOImageDecoderPlugin::create(file->bytes()));
+    EXPECT_EQ(plugin_decoder->size(), Gfx::IntSize(256, 256));
+}
+
 TEST_CASE(test_cur)
 {
     auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("cur/cursor.cur"sv)));
@@ -514,6 +523,19 @@ TEST_CASE(test_png_malformed_frame)
         auto frame_or_error = plugin_decoder->frame(0);
         EXPECT(frame_or_error.is_error());
     }
+}
+
+// Regression test: libpng longjmp() out of png_read_image() must not leak the in-flight row-pointers buffer or bitmap
+// from PNGLoadingContext::read_frames(). The fixture has a valid IHDR, but a corrupted IDAT body that decompresses past
+// its zlib end-of-block marker — forcing libpng to longjmp mid-decode.
+TEST_CASE(test_png_corrupt_idat_does_not_leak_on_libpng_longjmp)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("png/corrupt-idat.png"sv)));
+    auto plugin_or_error = Gfx::PNGImageDecoderPlugin::create(file->bytes());
+    // PNGImageDecoderPlugin::create() catches the libpng error and falls back to a single-frame placeholder — so we
+    // don't assert on the result here. The test passes if the run completes without LeakSanitizer reports.
+    if (!plugin_or_error.is_error())
+        (void)plugin_or_error.release_value()->frame(0);
 }
 
 TEST_CASE(test_png_large_dimensions)

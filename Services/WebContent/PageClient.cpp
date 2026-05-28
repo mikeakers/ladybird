@@ -26,6 +26,7 @@
 #include <LibWeb/DOM/MutationType.h>
 #include <LibWeb/DOM/NodeList.h>
 #include <LibWeb/HTML/BrowsingContext.h>
+#include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/HTMLLinkElement.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
@@ -50,6 +51,15 @@ static bool s_is_headless { false };
 static bool s_async_scrolling_enabled { false };
 
 GC_DEFINE_ALLOCATOR(PageClient);
+
+static String serialize_dom_mutation_target(Web::DOM::Node const& target)
+{
+    StringBuilder builder;
+    auto serializer = MUST(JsonObjectSerializer<>::try_create(builder));
+    target.serialize_tree_as_json(serializer);
+    MUST(serializer.finish());
+    return MUST(builder.to_string());
+}
 
 void PageClient::set_use_skia_painter(UseSkiaPainter use_skia_painter)
 {
@@ -97,6 +107,9 @@ void PageClient::visit_edges(JS::Cell::Visitor& visitor)
     Base::visit_edges(visitor);
     visitor.visit(m_page);
     visitor.visit(m_top_level_document_console_client);
+    m_pending_dom_mutations.for_each([&](auto& pending_mutation) {
+        visitor.visit(pending_mutation.target);
+    });
 
     if (m_webdriver)
         m_webdriver->visit_edges(visitor);
@@ -149,8 +162,11 @@ Gfx::Palette PageClient::palette() const
 void PageClient::set_palette_impl(Gfx::PaletteImpl& impl)
 {
     m_palette_impl = impl;
-    if (auto* document = page().top_level_browsing_context().active_document())
+    if (auto* document = page().top_level_browsing_context().active_document()) {
         document->invalidate_style(Web::DOM::StyleInvalidationReason::SettingsChange);
+        document->set_needs_media_query_evaluation();
+    }
+    request_frame();
 }
 
 void PageClient::set_preferred_color_scheme(Web::CSS::PreferredColorScheme color_scheme)
@@ -193,6 +209,14 @@ void PageClient::set_window_position(Web::DevicePixelPoint position)
 void PageClient::set_window_size(Web::DevicePixelSize size)
 {
     page().set_window_size(size);
+}
+
+void PageClient::compositor_process_reconnected()
+{
+    page().top_level_traversable()->repaint_after_compositor_process_reconnect();
+    page().republish_all_canvas_element_surfaces();
+    page().update_all_media_element_video_sinks();
+    Web::HTML::main_thread_event_loop().queue_task_to_update_the_rendering();
 }
 
 Queue<Web::QueuedInputEvent>& PageClient::input_event_queue()
@@ -358,6 +382,7 @@ void PageClient::page_did_change_active_document_in_top_level_browsing_context(W
 {
     auto& realm = document.realm();
 
+    clear_pending_dom_mutations();
     m_web_ui.clear();
 
     if (auto console_client = document.console_client()) {
@@ -688,7 +713,7 @@ void PageClient::page_did_request_activate_tab()
 
 void PageClient::page_did_close_top_level_traversable()
 {
-    page().top_level_traversable()->compositor_context().stop_presenting_to_client();
+    page().top_level_traversable()->compositor_context().set_presentation_mode(Empty {});
 
     // FIXME: Rename this IPC call
     client().async_did_close_browsing_context(m_id);
@@ -696,6 +721,16 @@ void PageClient::page_did_close_top_level_traversable()
     // NOTE: This only removes the strong reference the PageHost has for this PageClient.
     //       It will be GC'd 'later'.
     m_owner.remove_page({}, m_id);
+}
+
+void PageClient::page_did_change_needs_beforeunload_check(bool needs_beforeunload_check)
+{
+    client().async_did_change_needs_beforeunload_check(m_id, needs_beforeunload_check);
+}
+
+void PageClient::send_current_needs_beforeunload_check()
+{
+    client().async_did_change_needs_beforeunload_check(m_id, page().needs_beforeunload_check());
 }
 
 void PageClient::page_did_update_navigation_buttons_state(bool back_enabled, bool forward_enabled)
@@ -728,6 +763,11 @@ void PageClient::page_did_change_theme_color(Gfx::Color color)
     client().async_did_change_theme_color(m_id, color);
 }
 
+void PageClient::page_did_change_background_color(Gfx::Color color)
+{
+    client().async_did_change_background_color(m_id, color);
+}
+
 void PageClient::page_did_insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresentation const& entry, StringView presentation_style)
 {
     client().async_did_insert_clipboard_entry(m_id, entry, presentation_style);
@@ -738,9 +778,14 @@ void PageClient::page_did_request_clipboard_entries(u64 request_id)
     client().async_did_request_clipboard_entries(m_id, request_id);
 }
 
-void PageClient::page_did_request_paste()
+void PageClient::page_did_request_primary_paste()
 {
-    client().async_did_request_paste(m_id);
+    client().async_did_request_primary_paste(m_id);
+}
+
+void PageClient::page_did_update_primary_selection(String const& text)
+{
+    client().async_did_update_primary_selection(m_id, text);
 }
 
 void PageClient::page_did_change_audio_play_state(Web::HTML::AudioPlayState play_state)
@@ -748,15 +793,20 @@ void PageClient::page_did_change_audio_play_state(Web::HTML::AudioPlayState play
     client().async_did_change_audio_play_state(m_id, play_state);
 }
 
-Web::PageClient::WorkerAgentResponse PageClient::request_worker_agent(Web::Bindings::AgentType type)
+Web::HTML::WorkerAgentId PageClient::start_worker_agent(Web::HTML::WorkerAgentStartRequest&& request)
 {
-    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::RequestWorkerAgent>(m_id, type);
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::StartWorkerAgent>(m_id, move(request));
     if (!response) {
-        dbgln("WebContent client disconnected during RequestWorkerAgent. Exiting peacefully.");
+        dbgln("WebContent client disconnected during StartWorkerAgent. Exiting peacefully.");
         exit(0);
     }
 
-    return { response->take_handle(), response->take_request_server_handle(), response->take_image_decoder_handle() };
+    return response->agent_id();
+}
+
+void PageClient::close_worker_agent(Web::HTML::WorkerAgentId agent_id, Web::HTML::WorkerAgentOwnerToken owner_token)
+{
+    client().async_close_worker_agent(m_id, agent_id, owner_token);
 }
 
 void PageClient::page_did_mutate_dom(FlyString const& type, Web::DOM::Node const& target, Web::DOM::NodeList& added_nodes, Web::DOM::NodeList& removed_nodes, GC::Ptr<Web::DOM::Node>, GC::Ptr<Web::DOM::Node>, Optional<String> const& attribute_name)
@@ -788,13 +838,40 @@ void PageClient::page_did_mutate_dom(FlyString const& type, Web::DOM::Node const
         VERIFY_NOT_REACHED();
     }
 
-    StringBuilder builder;
-    auto serializer = MUST(JsonObjectSerializer<>::try_create(builder));
-    target.serialize_tree_as_json(serializer);
-    MUST(serializer.finish());
-    auto serialized_target = MUST(builder.to_string());
+    auto mutation_message = WebView::Mutation { type.to_string(), target.unique_id(), {}, mutation.release_value() };
+    if (m_pending_dom_mutations.is_empty() && target.document().layout_is_up_to_date()) {
+        send_dom_mutation(target, move(mutation_message));
+        return;
+    }
 
-    client().async_did_mutate_dom(m_id, { type.to_string(), target.unique_id(), move(serialized_target), mutation.release_value() });
+    m_pending_dom_mutations.enqueue({ const_cast<Web::DOM::Node&>(target), move(mutation_message) });
+}
+
+void PageClient::flush_pending_dom_mutations()
+{
+    if (!page().listen_for_dom_mutations()) {
+        clear_pending_dom_mutations();
+        return;
+    }
+
+    while (!m_pending_dom_mutations.is_empty()) {
+        if (!m_pending_dom_mutations.head().target->document().layout_is_up_to_date())
+            break;
+
+        auto pending_mutation = m_pending_dom_mutations.dequeue();
+        send_dom_mutation(*pending_mutation.target, move(pending_mutation.mutation));
+    }
+}
+
+void PageClient::clear_pending_dom_mutations()
+{
+    m_pending_dom_mutations.clear();
+}
+
+void PageClient::send_dom_mutation(Web::DOM::Node const& target, WebView::Mutation mutation)
+{
+    mutation.serialized_target = serialize_dom_mutation_target(target);
+    client().async_did_mutate_dom(m_id, move(mutation));
 }
 
 void PageClient::page_did_take_screenshot(Gfx::ShareableBitmap const& screenshot)
@@ -1020,7 +1097,7 @@ Web::DisplayListPlayerType PageClient::display_list_player_type() const
 
 void PageClient::ensure_compositor_host()
 {
-    m_owner.ensure_compositor_host(display_list_player_type());
+    m_owner.ensure_compositor_host();
 }
 
 Web::Compositor::CompositorHost* PageClient::compositor_host()

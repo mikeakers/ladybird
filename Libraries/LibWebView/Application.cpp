@@ -6,6 +6,9 @@
 
 #include <AK/Checked.h>
 #include <AK/Debug.h>
+#include <AK/JsonArray.h>
+#include <AK/JsonObject.h>
+#include <AK/ScopeGuard.h>
 #include <AK/Time.h>
 #include <LibCore/AnonymousBuffer.h>
 #include <LibCore/ArgsParser.h>
@@ -168,7 +171,6 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     bool disable_http_memory_cache = false;
     bool disable_http_disk_cache = false;
     bool disable_content_blocker = false;
-    bool enable_compositor_process = false;
     Vector<StringView> content_blocker_list_paths;
     Optional<StringView> resource_substitution_map_path;
     bool enable_autoplay = false;
@@ -243,7 +245,6 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     args_parser.add_option(disable_http_memory_cache, "Disable HTTP memory cache", "disable-http-memory-cache");
     args_parser.add_option(disable_http_disk_cache, "Disable HTTP disk cache", "disable-http-disk-cache");
     args_parser.add_option(disable_content_blocker, "Disable content blocker", "disable-content-blocker");
-    args_parser.add_option(enable_compositor_process, "Enable the out-of-process compositor", "enable-compositor-process");
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
         .help_string = "Path to a content blocker list. May be specified multiple times.",
@@ -332,8 +333,16 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     if (profile_process.has_value())
         profile_process_type = process_type_from_name(*profile_process);
 
+    auto configured_content_blocker_list_paths = m_settings.config_variable_as_string_array(ConfigVariableID::ContentBlockerListPaths);
+
     Vector<ByteString> content_blocker_list_paths_as_byte_strings;
-    TRY(content_blocker_list_paths_as_byte_strings.try_ensure_capacity(content_blocker_list_paths.size()));
+    TRY(content_blocker_list_paths_as_byte_strings.try_ensure_capacity(configured_content_blocker_list_paths.size() + content_blocker_list_paths.size()));
+    for (auto const& path : configured_content_blocker_list_paths) {
+        if (path.is_empty())
+            continue;
+
+        content_blocker_list_paths_as_byte_strings.unchecked_append(path.to_byte_string());
+    }
     for (auto path : content_blocker_list_paths)
         content_blocker_list_paths_as_byte_strings.unchecked_append(path);
 
@@ -359,7 +368,6 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
                 : OptionalNone()),
         .devtools_port = devtools_port,
         .enable_content_blocker = disable_content_blocker ? EnableContentBlocker::No : EnableContentBlocker::Yes,
-        .enable_compositor_process = enable_compositor_process ? EnableCompositorProcess::Yes : EnableCompositorProcess::No,
         .content_blocker_list_paths = move(content_blocker_list_paths_as_byte_strings),
     };
 
@@ -493,24 +501,25 @@ static ErrorOr<NonnullRefPtr<WebContentClient>> create_web_content_client(Option
     return client;
 }
 
-static bool should_skip_compositor_process_ipc(RefPtr<CompositorClient> const& compositor_client)
+static bool can_send_compositor_process_ipc(RefPtr<CompositorClient> const& compositor_client)
 {
-    if (Application::browser_options().enable_compositor_process == EnableCompositorProcess::No)
-        return true;
-    if (!compositor_client && Core::EventLoop::current().was_exit_requested())
-        return true;
-    return false;
+    if (!compositor_client)
+        return false;
+    return compositor_client->is_open();
 }
 
 ErrorOr<void> Application::connect_web_content_to_compositor(WebContentClient& web_content_client)
 {
-    if (m_browser_options.enable_compositor_process == EnableCompositorProcess::No)
-        return {};
     if (web_content_client.compositor_connection_id({}).has_value())
         return {};
 
-    VERIFY(m_compositor_client);
-    auto response = m_compositor_client->connect_web_content();
+    if (!m_compositor_client)
+        return Error::from_string_literal("Compositor process is not available");
+
+    auto response_or_error = m_compositor_client->try_connect_web_content();
+    if (response_or_error.is_error())
+        return Error::from_string_literal("Compositor process disconnected while connecting WebContent");
+    auto response = response_or_error.release_value();
 
     web_content_client.set_compositor_connection_id({}, response.web_content_connection_id());
     web_content_client.async_connect_to_compositor_process(response.take_handle());
@@ -519,7 +528,7 @@ ErrorOr<void> Application::connect_web_content_to_compositor(WebContentClient& w
 
 void Application::register_compositor_context(WebContentClient& web_content_client, Web::Compositor::CompositorContextId context_id, Optional<u64> page_id, Web::Compositor::PagePresentationRegistration page_presentation_registration)
 {
-    if (should_skip_compositor_process_ipc(m_compositor_client))
+    if (!can_send_compositor_process_ipc(m_compositor_client))
         return;
     VERIFY(m_compositor_client);
 
@@ -533,39 +542,71 @@ void Application::register_compositor_context(WebContentClient& web_content_clie
     m_compositor_client->create_context(context_id, page_id, page_presentation_registration, *web_content_connection_id);
 }
 
+ErrorOr<void> Application::try_register_compositor_context(WebContentClient& web_content_client, Web::Compositor::CompositorContextId context_id, Optional<u64> page_id, Web::Compositor::PagePresentationRegistration page_presentation_registration)
+{
+    if (!m_compositor_client)
+        return Error::from_string_literal("Compositor process is not available");
+
+    auto web_content_connection_id = web_content_client.compositor_connection_id({});
+    if (!web_content_connection_id.has_value()) {
+        TRY(connect_web_content_to_compositor(web_content_client));
+        web_content_connection_id = web_content_client.compositor_connection_id({});
+    }
+    VERIFY(web_content_connection_id.has_value());
+
+    auto result = m_compositor_client->try_create_context(context_id, page_id, page_presentation_registration, *web_content_connection_id);
+    if (result.is_error())
+        return Error::from_string_literal("Compositor process disconnected while creating context");
+
+    return {};
+}
+
 void Application::update_compositor_viewport(Web::Compositor::CompositorContextId context_id, Gfx::IntSize viewport_size, Web::Compositor::WindowResizingInProgress window_resize_in_progress)
 {
-    if (should_skip_compositor_process_ipc(m_compositor_client))
+    if (!can_send_compositor_process_ipc(m_compositor_client))
         return;
     VERIFY(m_compositor_client);
 
-    m_compositor_client->async_viewport_size_updated(context_id, viewport_size, true, window_resize_in_progress);
+    m_compositor_client->async_viewport_size_updated(context_id, viewport_size, window_resize_in_progress);
 }
 
 bool Application::send_async_scroll_to_compositor(Web::Compositor::CompositorContextId context_id, Gfx::FloatPoint position, Gfx::FloatPoint delta_in_device_pixels)
 {
-    VERIFY(m_compositor_client);
-    return m_compositor_client->async_scroll_by(context_id, position, delta_in_device_pixels);
+    if (!can_send_compositor_process_ipc(m_compositor_client))
+        return false;
+
+    auto result = m_compositor_client->try_async_scroll_by(context_id, position, delta_in_device_pixels);
+    if (result.is_error())
+        return false;
+    return result.release_value();
 }
 
 bool Application::handle_mouse_event_in_compositor(Web::Compositor::CompositorContextId context_id, Web::MouseEvent const& event)
 {
-    VERIFY(m_compositor_client);
-    return m_compositor_client->handle_mouse_event(context_id, event.clone_without_browser_data());
+    if (!can_send_compositor_process_ipc(m_compositor_client))
+        return false;
+
+    auto result = m_compositor_client->try_handle_mouse_event(context_id, event.clone_without_browser_data());
+    if (result.is_error())
+        return false;
+    return result.release_value();
 }
 
-void Application::dispatch_mouse_event_to_web_content(Web::Compositor::CompositorContextId context_id, Web::MouseEvent const& event)
+bool Application::dispatch_mouse_event_to_web_content(Web::Compositor::CompositorContextId context_id, Web::MouseEvent const& event)
 {
-    if (should_skip_compositor_process_ipc(m_compositor_client))
-        return;
+    if (!can_send_compositor_process_ipc(m_compositor_client))
+        return false;
     VERIFY(m_compositor_client);
 
-    m_compositor_client->async_dispatch_mouse_event_to_web_content(context_id, event.clone_without_browser_data());
+    auto result = m_compositor_client->try_dispatch_mouse_event_to_web_content(context_id, event.clone_without_browser_data());
+    if (result.is_error())
+        return false;
+    return result.release_value();
 }
 
 void Application::notify_compositor_presented_bitmap_ready_to_paint(Web::Compositor::CompositorContextId context_id, i32 bitmap_id)
 {
-    if (should_skip_compositor_process_ipc(m_compositor_client))
+    if (!can_send_compositor_process_ipc(m_compositor_client))
         return;
     VERIFY(m_compositor_client);
 
@@ -669,8 +710,7 @@ ErrorOr<void> Application::launch_services()
 
     TRY(launch_request_server());
     TRY(launch_image_decoder_server());
-    if (m_browser_options.enable_compositor_process == EnableCompositorProcess::Yes)
-        TRY(launch_compositor_process());
+    TRY(launch_compositor_process());
 
     if (m_browser_options.devtools_port.has_value())
         TRY(launch_devtools_server());
@@ -683,16 +723,84 @@ ErrorOr<void> Application::launch_compositor_process()
     VERIFY(!m_compositor_client);
     m_compositor_client = TRY(WebView::launch_compositor_process());
     m_compositor_client->on_death = [this]() {
-        m_compositor_client = nullptr;
-
-        if (Core::EventLoop::current().was_exit_requested())
-            return;
-
-        dbgln("Compositor process died");
-        VERIFY_NOT_REACHED();
+        handle_compositor_process_death();
     };
 
     return {};
+}
+
+void Application::handle_compositor_process_death()
+{
+    m_compositor_client = nullptr;
+
+    if (Core::EventLoop::current().was_exit_requested())
+        return;
+    switch (m_compositor_recovery_state) {
+    case CompositorRecoveryState::Idle:
+        break;
+    case CompositorRecoveryState::Queued:
+        return;
+    case CompositorRecoveryState::Recovering:
+        warnln("Compositor process died while recovering, crashing Browser");
+        VERIFY_NOT_REACHED();
+    }
+
+    m_compositor_recovery_state = CompositorRecoveryState::Queued;
+    Core::deferred_invoke([this] {
+        VERIFY(m_compositor_recovery_state == CompositorRecoveryState::Queued);
+        m_compositor_recovery_state = CompositorRecoveryState::Idle;
+        recover_compositor_process();
+    });
+}
+
+void Application::recover_compositor_process()
+{
+    if (Core::EventLoop::current().was_exit_requested())
+        return;
+
+    constexpr size_t max_compositor_restart_count = 3;
+    if (m_compositor_restart_count >= max_compositor_restart_count) {
+        warnln("Compositor process crashed repeatedly, crashing Browser");
+        VERIFY_NOT_REACHED();
+    }
+
+    ++m_compositor_restart_count;
+    dbgln("Compositor process died, restarting ({}/{})", m_compositor_restart_count, max_compositor_restart_count);
+
+    VERIFY(m_compositor_recovery_state == CompositorRecoveryState::Idle);
+    m_compositor_recovery_state = CompositorRecoveryState::Recovering;
+    ScopeGuard clear_recovery_flag = [this] {
+        m_compositor_recovery_state = CompositorRecoveryState::Idle;
+    };
+
+    if (auto result = launch_compositor_process(); result.is_error()) {
+        warnln("Unable to restart Compositor process: {}", result.error());
+        VERIFY_NOT_REACHED();
+    }
+
+    Vector<NonnullRefPtr<WebContentClient>> clients;
+    WebContentClient::for_each_client([&](WebContentClient& client) {
+        if (client.is_open())
+            clients.append(NonnullRefPtr { client });
+        return IterationDecision::Continue;
+    });
+
+    for (auto& client : clients) {
+        if (auto result = client->reconnect_to_compositor_process({}); result.is_error()) {
+            warnln("Unable to reconnect WebContent process {} to Compositor: {}", client->pid(), result.error());
+            VERIFY_NOT_REACHED();
+        }
+    }
+    for (auto& client : clients) {
+        if (auto result = client->recreate_compositor_contexts({}); result.is_error()) {
+            warnln("Unable to recreate Compositor contexts for WebContent process {}: {}", client->pid(), result.error());
+            VERIFY_NOT_REACHED();
+        }
+    }
+    for (auto& client : clients)
+        client->update_compositor_viewports_after_reconnect({});
+    for (auto& client : clients)
+        client->notify_compositor_process_reconnected({});
 }
 
 ErrorOr<void> Application::launch_request_server()
@@ -981,13 +1089,26 @@ void Application::display_error_dialog(StringView error_message) const
     warnln("{}", error_message);
 }
 
-Utf16String Application::clipboard_text() const
+bool Application::supports_clipboard_type(ClipboardType type) const
+{
+    return type == ClipboardType::Text;
+}
+
+Utf16String Application::clipboard_text(ClipboardType) const
 {
     if (!m_clipboard.has_value())
         return {};
     if (m_clipboard->mime_type != "text/plain"sv)
         return {};
     return Utf16String::from_utf8(m_clipboard->data);
+}
+
+void Application::set_clipboard_text(String text, ClipboardType)
+{
+    m_clipboard = Web::Clipboard::SystemClipboardRepresentation {
+        .data = text.to_byte_string(),
+        .mime_type = "text/plain"_string,
+    };
 }
 
 Vector<Web::Clipboard::SystemClipboardRepresentation> Application::clipboard_entries() const
@@ -1349,6 +1470,7 @@ void Application::initialize_actions()
     m_debug_menu->add_action(Action::create("Dump CSS Errors"sv, ActionID::DumpCSSErrors, debug_request("dump-all-css-errors"sv)));
     m_debug_menu->add_action(Action::create("Dump Cookies"sv, ActionID::DumpCookies, [this]() { m_cookie_jar->dump_cookies(); }));
     m_debug_menu->add_action(Action::create("Dump Local Storage"sv, ActionID::DumpLocalStorage, debug_request("dump-local-storage"sv)));
+    m_debug_menu->add_action(Action::create("Dump WASM Stats"sv, ActionID::DumpWasmStats, debug_request("dump-wasm-stats"sv)));
     m_debug_menu->add_action(Action::create("Dump GC graph"sv, ActionID::DumpGCGraph, [this]() {
         if (auto view = active_web_view(); view.has_value()) {
             auto gc_graph_path = view->dump_gc_graph();
@@ -1646,6 +1768,54 @@ void Application::inspect_dom_node(DevTools::TabDescription const& description, 
     view->inspect_dom_node(node_id, property_type, pseudo_element);
 }
 
+void Application::inspect_grid_layouts(DevTools::TabDescription const& description, Web::UniqueNodeID root_node_id, OnGridLayoutsReceived on_grid_layouts_received) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_grid_layouts_received({});
+        return;
+    }
+
+    view->on_received_grid_layouts = [&view = *view, on_grid_layouts_received = move(on_grid_layouts_received)](JsonArray grid_layouts) {
+        view.on_received_grid_layouts = nullptr;
+        on_grid_layouts_received(move(grid_layouts));
+    };
+
+    view->inspect_grid_layouts(root_node_id);
+}
+
+void Application::inspect_current_grid(DevTools::TabDescription const& description, Web::UniqueNodeID node_id, OnCurrentGridReceived on_current_grid_received) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_current_grid_received({});
+        return;
+    }
+
+    view->on_received_current_grid = [&view = *view, on_current_grid_received = move(on_current_grid_received)](Optional<JsonObject> grid_layout) {
+        view.on_received_current_grid = nullptr;
+        on_current_grid_received(move(grid_layout));
+    };
+
+    view->inspect_current_grid(node_id);
+}
+
+void Application::inspect_current_flexbox(DevTools::TabDescription const& description, Web::UniqueNodeID node_id, bool only_look_at_parents, OnCurrentFlexboxReceived on_current_flexbox_received) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_current_flexbox_received({});
+        return;
+    }
+
+    view->on_received_current_flexbox = [&view = *view, on_current_flexbox_received = move(on_current_flexbox_received)](Optional<JsonObject> flexbox_layout) {
+        view.on_received_current_flexbox = nullptr;
+        on_current_flexbox_received(move(flexbox_layout));
+    };
+
+    view->inspect_current_flexbox(node_id, only_look_at_parents);
+}
+
 void Application::clear_inspected_dom_node(DevTools::TabDescription const& description) const
 {
     if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
@@ -1662,6 +1832,30 @@ void Application::clear_highlighted_dom_node(DevTools::TabDescription const& des
 {
     if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
         view->clear_highlighted_dom_node();
+}
+
+void Application::highlight_flexbox(DevTools::TabDescription const& description, Web::UniqueNodeID node_id, JsonValue options) const
+{
+    if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
+        view->highlight_flexbox(node_id, move(options));
+}
+
+void Application::clear_flexbox_highlight(DevTools::TabDescription const& description, Web::UniqueNodeID node_id) const
+{
+    if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
+        view->clear_flexbox_highlight(node_id);
+}
+
+void Application::highlight_grid(DevTools::TabDescription const& description, Web::UniqueNodeID node_id, JsonValue options) const
+{
+    if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
+        view->highlight_grid(node_id, move(options));
+}
+
+void Application::clear_grid_highlight(DevTools::TabDescription const& description, Web::UniqueNodeID node_id) const
+{
+    if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
+        view->clear_grid_highlight(node_id);
 }
 
 void Application::listen_for_dom_mutations(DevTools::TabDescription const& description, OnDOMMutationReceived on_dom_mutation_received) const

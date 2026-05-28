@@ -20,6 +20,7 @@
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/HTMLIFrameElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLMediaElement.h>
@@ -215,6 +216,9 @@ CSSPixelRect Page::web_exposed_available_screen_area() const
 
 CSS::PreferredColorScheme Page::preferred_color_scheme() const
 {
+    if (m_preferred_color_scheme_override_for_testing.has_value())
+        return *m_preferred_color_scheme_override_for_testing;
+
     auto preferred_color_scheme = m_client->preferred_color_scheme();
 
     if (preferred_color_scheme == CSS::PreferredColorScheme::Auto)
@@ -333,9 +337,9 @@ EventResult Page::handle_drag_and_drop_event(DragEvent::Type type, DevicePixelPo
     return top_level_traversable()->event_handler().handle_drag_and_drop_event(type, device_to_css_point(position), device_to_css_point(screen_position), button, buttons, modifiers, move(files));
 }
 
-EventResult Page::handle_pinch_event(DevicePixelPoint position, double scale)
+EventResult Page::handle_pinch_event(DevicePixelPoint position, unsigned modifiers, double scale)
 {
-    return top_level_traversable()->event_handler().handle_pinch_event(device_to_css_point(position), scale);
+    return top_level_traversable()->event_handler().handle_pinch_event(device_to_css_point(position), modifiers, scale);
 }
 
 EventResult Page::handle_keydown(UIEvents::KeyCode key, unsigned modifiers, u32 code_point, bool repeat)
@@ -363,11 +367,41 @@ void Page::invalidate_compositor_wheel_event_listener_state()
     top_level_traversable()->compositor_context().invalidate_wheel_event_listener_state(m_wheel_event_listener_state_generation);
 }
 
+void Page::update_needs_beforeunload_check()
+{
+    auto needs_beforeunload_check = [&] {
+        if (!top_level_traversable_is_initialized())
+            return true;
+
+        auto top_level_traversable = this->top_level_traversable();
+        auto active_document = top_level_traversable->active_document();
+        if (!active_document)
+            return true;
+        if (active_document->navigable() != top_level_traversable.ptr())
+            return true;
+
+        for (auto const& navigable : active_document->inclusive_descendant_navigables()) {
+            auto window = navigable->active_window();
+            if (window && window->has_event_listener(HTML::EventNames::beforeunload))
+                return true;
+        }
+
+        return false;
+    }();
+
+    if (m_needs_beforeunload_check == needs_beforeunload_check)
+        return;
+
+    m_needs_beforeunload_check = needs_beforeunload_check;
+    client().page_did_change_needs_beforeunload_check(m_needs_beforeunload_check);
+}
+
 void Page::set_top_level_traversable(GC::Ref<HTML::TraversableNavigable> navigable)
 {
     VERIFY(!m_top_level_traversable); // Replacement is not allowed!
     VERIFY(&navigable->page() == this);
     m_top_level_traversable = navigable;
+    update_needs_beforeunload_check();
 }
 
 bool Page::top_level_traversable_is_initialized() const
@@ -660,6 +694,13 @@ void Page::present_all_canvas_element_surfaces()
     });
 }
 
+void Page::republish_all_canvas_element_surfaces()
+{
+    for_each_canvas_element([](auto& canvas_element) {
+        canvas_element.republish_compositor_surface();
+    });
+}
+
 void Page::did_request_media_context_menu(UniqueNodeID media_id, CSSPixelPoint position, ByteString const& target, unsigned modifiers, MediaContextMenu const& menu)
 {
     m_media_context_menu_element_id = media_id;
@@ -780,9 +821,9 @@ void Page::invalidate_user_style()
         return;
 
     auto invalidate_document = [](DOM::Document& document) {
+        document.invalidate_content_blocker_style_sheet();
         document.style_scope().invalidate_rule_cache();
         document.for_each_shadow_root([](auto& shadow_root) {
-            shadow_root.style_scope().invalidate_rule_cache();
             shadow_root.invalidate_style(DOM::StyleInvalidationReason::StyleSheetReplace);
         });
         document.invalidate_style(DOM::StyleInvalidationReason::StyleSheetReplace);

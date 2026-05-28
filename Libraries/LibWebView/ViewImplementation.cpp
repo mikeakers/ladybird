@@ -14,6 +14,7 @@
 #include <LibGfx/ImageFormats/PNGWriter.h>
 #include <LibGfx/SharedImageBuffer.h>
 #include <LibURL/Parser.h>
+#include <LibWeb/CSS/SystemColor.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/Infra/Strings.h>
 #include <LibWebView/Application.h>
@@ -130,6 +131,12 @@ void ViewImplementation::set_favicon(Badge<WebContentClient>, Gfx::Bitmap const&
 
 void ViewImplementation::create_new_process_for_cross_site_navigation(URL::URL const& url)
 {
+    if (m_client_state.has_usable_bitmap) {
+        // Keep showing the old page until the new WebContent process paints its first frame.
+        m_backup_shared_image_buffer = move(m_client_state.front_bitmap.shared_image_buffer);
+        m_backup_bitmap_size = m_client_state.front_bitmap.last_painted_size;
+    }
+
     if (m_client_state.client) {
         m_client_state.client->unregister_view(m_client_state.page_index);
     }
@@ -140,8 +147,6 @@ void ViewImplementation::create_new_process_for_cross_site_navigation(URL::URL c
     if (on_web_content_process_change_for_cross_site_navigation)
         on_web_content_process_change_for_cross_site_navigation();
 
-    // Don't keep a stale backup bitmap around.
-    m_backup_shared_image_buffer = nullptr;
     handle_resize();
 
     load(url);
@@ -184,6 +189,9 @@ void ViewImplementation::did_update_window_rect()
 
 void ViewImplementation::set_system_visibility_state(Web::HTML::VisibilityState visibility_state)
 {
+    if (m_system_visibility_state == visibility_state)
+        return;
+
     m_system_visibility_state = visibility_state;
     client().async_set_system_visibility_state(m_client_state.page_index, m_system_visibility_state);
 }
@@ -345,6 +353,9 @@ void ViewImplementation::did_finish_handling_input_event(Badge<WebContentClient>
 
 void ViewImplementation::set_preferred_color_scheme(Web::CSS::PreferredColorScheme color_scheme)
 {
+    m_preferred_color_scheme = color_scheme;
+    set_page_background_color(preferred_canvas_background_color());
+
     client().async_set_preferred_color_scheme(page_id(), color_scheme);
 }
 
@@ -459,6 +470,21 @@ void ViewImplementation::inspect_dom_node(Web::UniqueNodeID node_id, DOMNodeProp
     client().async_inspect_dom_node(page_id(), property_type, node_id, pseudo_element);
 }
 
+void ViewImplementation::inspect_grid_layouts(Web::UniqueNodeID root_node_id)
+{
+    client().async_inspect_grid_layouts(page_id(), root_node_id);
+}
+
+void ViewImplementation::inspect_current_grid(Web::UniqueNodeID node_id)
+{
+    client().async_inspect_current_grid(page_id(), node_id);
+}
+
+void ViewImplementation::inspect_current_flexbox(Web::UniqueNodeID node_id, bool only_look_at_parents)
+{
+    client().async_inspect_current_flexbox(page_id(), node_id, only_look_at_parents);
+}
+
 void ViewImplementation::clear_inspected_dom_node()
 {
     client().async_clear_inspected_dom_node(page_id());
@@ -472,6 +498,26 @@ void ViewImplementation::highlight_dom_node(Web::UniqueNodeID node_id, Optional<
 void ViewImplementation::clear_highlighted_dom_node()
 {
     highlight_dom_node(0, {});
+}
+
+void ViewImplementation::highlight_flexbox(Web::UniqueNodeID node_id, JsonValue options)
+{
+    client().async_highlight_flexbox(page_id(), node_id, move(options));
+}
+
+void ViewImplementation::clear_flexbox_highlight(Web::UniqueNodeID node_id)
+{
+    client().async_clear_flexbox_highlight(page_id(), node_id);
+}
+
+void ViewImplementation::highlight_grid(Web::UniqueNodeID node_id, JsonValue options)
+{
+    client().async_highlight_grid(page_id(), node_id, move(options));
+}
+
+void ViewImplementation::clear_grid_highlight(Web::UniqueNodeID node_id)
+{
+    client().async_clear_grid_highlight(page_id(), node_id);
 }
 
 void ViewImplementation::set_listen_for_dom_mutations(bool listen_for_dom_mutations)
@@ -672,6 +718,39 @@ void ViewImplementation::did_update_navigation_buttons_state(Badge<WebContentCli
     m_navigate_forward_action->set_enabled(forward_enabled);
 }
 
+void ViewImplementation::did_change_needs_beforeunload_check(Badge<WebContentClient>, bool needs_beforeunload_check)
+{
+    m_needs_beforeunload_check = needs_beforeunload_check;
+}
+
+void ViewImplementation::did_change_background_color(Badge<WebContentClient>, Gfx::Color color)
+{
+    set_page_background_color(color);
+}
+
+void ViewImplementation::set_page_background_color_to_system_canvas(bool dark)
+{
+    auto color_scheme = dark ? Web::CSS::PreferredColorScheme::Dark : Web::CSS::PreferredColorScheme::Light;
+    m_system_canvas_background_color = Web::CSS::SystemColor::canvas(color_scheme);
+    set_page_background_color(preferred_canvas_background_color());
+}
+
+void ViewImplementation::set_page_background_color(Gfx::Color color)
+{
+    m_page_background_color = color;
+    if (on_page_background_color_change)
+        on_page_background_color_change(m_page_background_color);
+}
+
+Gfx::Color ViewImplementation::preferred_canvas_background_color() const
+{
+    if (m_preferred_color_scheme == Web::CSS::PreferredColorScheme::Dark)
+        return Web::CSS::SystemColor::canvas(Web::CSS::PreferredColorScheme::Dark);
+    if (m_preferred_color_scheme == Web::CSS::PreferredColorScheme::Light)
+        return Web::CSS::SystemColor::canvas(Web::CSS::PreferredColorScheme::Light);
+    return m_system_canvas_background_color;
+}
+
 void ViewImplementation::did_allocate_backing_stores(Badge<WebContentClient>, i32 front_bitmap_id, Gfx::SharedImage front_backing_store, i32 back_bitmap_id, Gfx::SharedImage back_backing_store)
 {
     dbgln_if(COMPOSITOR_DEBUG, "[Compositor] UI installing backing stores for page {} front={} back={} had_usable_bitmap={}",
@@ -720,12 +799,13 @@ void ViewImplementation::apply_zoom_for_current_host()
 void ViewImplementation::handle_resize()
 {
     client().async_set_viewport(page_id(), viewport_size(), m_device_pixel_ratio, m_is_fullscreen);
-    if (Application::browser_options().enable_compositor_process == EnableCompositorProcess::Yes)
-        Application::the().update_compositor_viewport(client().compositor_context_id_for_page(page_id()), viewport_size().to_type<int>());
+    Application::the().update_compositor_viewport(client().compositor_context_id_for_page(page_id()), viewport_size().to_type<int>(), Web::Compositor::WindowResizingInProgress::Yes);
 }
 
 void ViewImplementation::initialize_client(CreateNewClient create_new_client)
 {
+    m_needs_beforeunload_check = true;
+
     if (create_new_client == CreateNewClient::Yes) {
         m_client_state = {};
 
@@ -741,10 +821,8 @@ void ViewImplementation::initialize_client(CreateNewClient create_new_client)
     client().async_set_viewport(m_client_state.page_index, viewport_size(), m_device_pixel_ratio, m_is_fullscreen);
     client().async_set_maximum_frames_per_second(m_client_state.page_index, m_maximum_frames_per_second);
     client().async_set_system_visibility_state(m_client_state.page_index, m_system_visibility_state);
-    if (Application::browser_options().enable_compositor_process == EnableCompositorProcess::Yes) {
-        auto compositor_context_id = client().compositor_context_id_for_page(m_client_state.page_index);
-        Application::the().update_compositor_viewport(compositor_context_id, viewport_size().to_type<int>());
-    }
+    auto compositor_context_id = client().compositor_context_id_for_page(m_client_state.page_index);
+    Application::the().update_compositor_viewport(compositor_context_id, viewport_size().to_type<int>());
     client().async_set_document_cookie_version_buffer(m_client_state.page_index, m_document_cookie_version_buffer);
 
     if (auto webdriver_endpoint = Application::browser_options().webdriver_endpoint; webdriver_endpoint.has_value())
@@ -1289,7 +1367,24 @@ void ViewImplementation::remove_navigation_listener(u64 listener_id)
 
 void ViewImplementation::request_close()
 {
-    client().async_request_close(page_id());
+    if (needs_beforeunload_check()) {
+        client().async_request_close(page_id());
+        return;
+    }
+
+    client().request_close(page_id());
+}
+
+Function<void()> ViewImplementation::prepare_for_immediate_close()
+{
+    VERIFY(!needs_beforeunload_check());
+
+    auto client = m_client_state.client;
+    auto page_id = m_client_state.page_index;
+    client->prepare_for_detached_close(page_id);
+    return [client = move(client), page_id] {
+        client->async_request_close(page_id);
+    };
 }
 
 }

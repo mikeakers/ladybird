@@ -31,6 +31,12 @@ class HeapHashTable;
 template<class T>
 class Root;
 
+template<class T>
+class Ref;
+
+template<class T>
+class Ptr;
+
 template<class T, size_t inline_capacity = 0>
 class ConservativeVector;
 
@@ -45,5 +51,8 @@ class RootVector;
 
 template<typename T, typename TraitsForT, bool IsOrdered>
 class RootHashTable;
+
+template<typename K, typename V>
+class WeakHashMap;
 
 }

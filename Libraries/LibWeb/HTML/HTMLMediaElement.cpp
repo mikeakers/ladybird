@@ -206,32 +206,14 @@ OptionalMediaProvider HTMLMediaElement::src_object() const
 {
     // The srcObject IDL attribute, on getting, must return the element's assigned media provider
     // object, if any, or null otherwise.
-    return assigned_media_provider_object().visit(
-        [](Empty) -> OptionalMediaProvider {
-            return Empty();
-        },
-        [](GC::Ref<FileAPI::Blob> blob) -> OptionalMediaProvider {
-            return { GC::Root(blob) };
-        },
-        [](GC::Ref<MediaSourceExtensions::MediaSource> media_source) -> OptionalMediaProvider {
-            return { GC::Root(media_source) };
-        });
+    return assigned_media_provider_object();
 }
 
 // https://html.spec.whatwg.org/multipage/media.html#dom-media-srcobject
 WebIDL::ExceptionOr<void> HTMLMediaElement::set_src_object(OptionalMediaProvider src_object)
 {
     // On setting, it must set the element's assigned media provider object to the new value,
-    set_assigned_media_provider_object(src_object.visit(
-        [](Empty) -> MediaProviderObject {
-            return Empty();
-        },
-        [](GC::Root<FileAPI::Blob> const& blob) -> MediaProviderObject {
-            return GC::Ref(*blob);
-        },
-        [](GC::Root<MediaSourceExtensions::MediaSource> const& media_source) -> MediaProviderObject {
-            return GC::Ref(*media_source);
-        }));
+    set_assigned_media_provider_object(src_object);
 
     // and then invoke the element's media element load algorithm.
     return load_element();
@@ -565,17 +547,6 @@ void HTMLMediaElement::pause()
     pause_element();
 }
 
-void HTMLMediaElement::toggle_playback()
-{
-    // AD-HOC: An execution context is required for Promise creation hooks.
-    TemporaryExecutionContext execution_context { realm() };
-
-    if (potentially_playing())
-        pause();
-    else
-        play();
-}
-
 // https://html.spec.whatwg.org/multipage/media.html#dom-media-volume
 WebIDL::ExceptionOr<void> HTMLMediaElement::set_volume(double volume)
 {
@@ -689,7 +660,7 @@ GC::Ref<TextTrack> HTMLMediaElement::add_text_track(Bindings::TextTrackKind kind
     //    text track's TextTrack object.
     queue_a_media_element_task([this, text_track] {
         Bindings::TrackEventInit event_init {};
-        event_init.track = GC::Root { text_track };
+        event_init.track = text_track;
 
         auto event = TrackEvent::create(this->realm(), HTML::EventNames::addtrack, move(event_init));
         m_text_tracks->dispatch_event(event);
@@ -1187,10 +1158,14 @@ void HTMLMediaElement::load_url_resource(URL::URL const& url_record, Function<vo
 
             // NB: The subsequent steps for local resources are contained in load_local_resource().
             auto const& blob_entry = FileAPI::resolve_a_blob_url(url_record).value();
-            load_local_resource(GC::Ref(*blob_entry.object.get<GC::Root<MediaSourceExtensions::MediaSource>>()), move(failure_callback));
+            load_local_resource(blob_entry.object.get<GC::Ref<MediaSourceExtensions::MediaSource>>(), move(failure_callback));
             return;
         }
     }
+
+    // This is only reached via a media element task which is only processed once the document is fully active.
+    // The observer callbacks that stop/restart the fetch depend on this invariant, so ensure it here.
+    VERIFY(document().is_fully_active());
 
     m_remote_fetch_data = make<RemoteFetchData>();
     m_remote_fetch_data->url_record = url_record;
@@ -1672,7 +1647,7 @@ void HTMLMediaElement::on_audio_track_added(Media::Track const& track)
 
     // 7. Fire an event named addtrack at this AudioTrackList object, using TrackEvent, with the track attribute initialized to the new AudioTrack object.
     Bindings::TrackEventInit event_init {};
-    event_init.track = GC::make_root(audio_track);
+    event_init.track = audio_track;
 
     auto event = TrackEvent::create(realm, EventNames::addtrack, move(event_init));
     m_audio_tracks->dispatch_event(event);
@@ -1715,7 +1690,7 @@ void HTMLMediaElement::on_video_track_added(Media::Track const& track)
 
     // 7. Fire an event named addtrack at this VideoTrackList object, using TrackEvent, with the track attribute initialized to the new VideoTrack object.
     Bindings::TrackEventInit event_init {};
-    event_init.track = GC::make_root(video_track);
+    event_init.track = video_track;
 
     auto event = TrackEvent::create(realm, HTML::EventNames::addtrack, move(event_init));
     m_video_tracks->dispatch_event(event);
@@ -1940,12 +1915,28 @@ void HTMLMediaElement::process_media_data(FetchingStatus fetching_status)
         // Set the networkState to NETWORK_IDLE and fire an event named suspend at the media element.
         m_network_state = NetworkState::Idle;
         dispatch_event(DOM::Event::create(realm, HTML::EventNames::suspend));
+
+        update_ready_state();
     } else if (fetching_status == FetchingStatus::Ongoing) {
-        // If the user agent ever discards any media data and then needs to resume the network activity to obtain it again, then it must queue a media
-        // element task given the media element to set the networkState to NETWORK_LOADING.
+        // If the user agent ever discards any media data and then needs to resume the network activity to obtain it
+        // again, then it must queue a media element task given the media element to set the networkState to NETWORK_LOADING.
         queue_a_media_element_task(GC::weak_callback(*this, [](auto& self) {
             self.m_network_state = NetworkState::Loading;
         }));
+
+        // While the load is not suspended (see below), every 350ms (±200ms) or for every byte received, whichever is
+        // least frequent, queue a media element task given the media element to:
+        auto now = MonotonicTime::now();
+        if (!m_last_progress_event_time.has_value() || now - m_last_progress_event_time.value() > AK::Duration::from_milliseconds(350)) {
+            m_last_progress_event_time = now;
+            queue_a_media_element_task(GC::weak_callback(*this, [](auto& self) {
+                // FIXME: 1. Set the element's is currently stalled to false.
+                // 2. Fire an event named progress at the element.
+                self.dispatch_event(DOM::Event::create(self.realm(), HTML::EventNames::progress));
+            }));
+
+            update_ready_state();
+        }
     }
 
     // -> If the connection is interrupted after some media data has been received, causing the user agent to give up trying

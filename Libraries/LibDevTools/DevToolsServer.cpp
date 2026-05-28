@@ -45,6 +45,11 @@ DevToolsServer::DevToolsServer(DevToolsDelegate& delegate, NonnullRefPtr<Core::T
 
 DevToolsServer::~DevToolsServer() = default;
 
+Optional<u16> DevToolsServer::local_port() const
+{
+    return m_server->local_port();
+}
+
 void DevToolsServer::refresh_tab_list()
 {
     if (!m_root_actor)
@@ -55,6 +60,13 @@ void DevToolsServer::refresh_tab_list()
     });
 
     m_root_actor->send_tab_list_changed_message();
+}
+
+void DevToolsServer::unregister_actor(String const& name)
+{
+    Core::deferred_invoke([this, name] {
+        m_actor_registry.remove(name);
+    });
 }
 
 ErrorOr<void> DevToolsServer::on_new_client()
