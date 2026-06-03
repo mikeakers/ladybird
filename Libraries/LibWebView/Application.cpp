@@ -8,6 +8,7 @@
 #include <AK/Debug.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <AK/Math.h>
 #include <AK/ScopeGuard.h>
 #include <AK/Time.h>
 #include <LibCore/AnonymousBuffer.h>
@@ -27,6 +28,7 @@
 #include <LibWebView/Application.h>
 #include <LibWebView/CompositorClient.h>
 #include <LibWebView/CookieJar.h>
+#include <LibWebView/HSTSStore.h>
 #include <LibWebView/HeadlessWebView.h>
 #include <LibWebView/HelperProcess.h>
 #include <LibWebView/HistoryStore.h>
@@ -51,7 +53,21 @@ namespace WebView {
 
 Application* Application::s_the = nullptr;
 
+static constexpr double default_display_refresh_rate = 60.0;
+
+static double sanitized_display_refresh_rate(double refresh_rate)
+{
+    if (refresh_rate != refresh_rate || refresh_rate <= 0 || refresh_rate >= AK::Infinity<double>)
+        return default_display_refresh_rate;
+    return refresh_rate;
+}
+
 struct ApplicationSettingsObserver final : public SettingsObserver {
+    virtual void tab_settings_changed() override
+    {
+        Application::the().tab_settings_changed({});
+    }
+
     virtual void show_bookmarks_bar_changed() override
     {
         Application::the().show_bookmarks_bar_changed({});
@@ -77,6 +93,14 @@ struct ApplicationSettingsObserver final : public SettingsObserver {
                 dbgln("Setting DNS server to {}:{} ({} local dnssec)", dns_over_udp.server_address, dns_over_udp.port, dns_over_udp.validate_dnssec_locally ? "with" : "without");
                 Application::request_server_client().async_set_dns_server(dns_over_udp.server_address, dns_over_udp.port, false, dns_over_udp.validate_dnssec_locally);
             });
+    }
+
+    virtual void config_variable_changed(ConfigVariableID variable) override
+    {
+        if (variable == ConfigVariableID::ShowAdvancedDebugMenu) {
+            auto enabled = Application::settings().config_variable_as_bool(ConfigVariableID::ShowAdvancedDebugMenu);
+            Application::the().debug_menu().set_visible(enabled);
+        }
     }
 };
 
@@ -425,7 +449,10 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     if (m_web_content_options.file_scheme_urls_have_tuple_origins == FileSchemeUrlsHaveTupleOrigins::Yes)
         URL::set_file_scheme_urls_have_tuple_origins();
 
-    TRY(load_content_blocker_lists());
+    if (auto result = load_content_blocker_lists(); result.is_error()) {
+        warnln("\033[31;1mUnable to load all content blocker lists:\033[0m {}", result.error());
+        warnln("    Configured lists: {}", m_browser_options.content_blocker_list_paths);
+    }
 
     initialize_actions();
 
@@ -485,20 +512,33 @@ void Application::open_url_in_new_window(URL::URL const& url)
     dbgln("open_url_in_new_window() is unsupported on this platform (url: {})", url);
 }
 
-static ErrorOr<NonnullRefPtr<WebContentClient>> create_web_content_client(Optional<ViewImplementation&> view)
+ErrorOr<NonnullRefPtr<WebContentClient>> Application::create_web_content_client(Optional<ViewImplementation&> view, u64 initial_page_id)
 {
     auto request_server_handle = TRY(connect_new_request_server_client());
     auto image_decoder_handle = TRY(connect_new_image_decoder_client());
 
-    NonnullRefPtr<WebContentClient> client = view.has_value()
-        ? TRY(WebView::launch_web_content_process(*view))
-        : TRY(WebView::launch_spare_web_content_process());
+    auto client = TRY(WebView::launch_web_content_process(initial_page_id));
+    client->async_initialize(initial_page_id);
+    if (view.has_value())
+        client->assign_view({}, *view);
 
     client->async_connect_to_request_server(move(request_server_handle));
     client->async_connect_to_image_decoder(move(image_decoder_handle));
     TRY(Application::the().connect_web_content_to_compositor(*client));
 
     return client;
+}
+
+u64 Application::allocate_page_id()
+{
+    VERIFY(m_next_page_or_compositor_context_id > 0);
+    return m_next_page_or_compositor_context_id++;
+}
+
+Web::Compositor::CompositorContextId Application::allocate_compositor_context_id()
+{
+    VERIFY(m_next_page_or_compositor_context_id > 0);
+    return Web::Compositor::CompositorContextId { m_next_page_or_compositor_context_id++ };
 }
 
 static bool can_send_compositor_process_ipc(RefPtr<CompositorClient> const& compositor_client)
@@ -526,7 +566,7 @@ ErrorOr<void> Application::connect_web_content_to_compositor(WebContentClient& w
     return {};
 }
 
-void Application::register_compositor_context(WebContentClient& web_content_client, Web::Compositor::CompositorContextId context_id, Optional<u64> page_id, Web::Compositor::PagePresentationRegistration page_presentation_registration)
+void Application::register_compositor_context(WebContentClient& web_content_client, Web::Compositor::CompositorContextId context_id, Optional<u64> page_id)
 {
     if (!can_send_compositor_process_ipc(m_compositor_client))
         return;
@@ -539,10 +579,10 @@ void Application::register_compositor_context(WebContentClient& web_content_clie
     }
     VERIFY(web_content_connection_id.has_value());
 
-    m_compositor_client->create_context(context_id, page_id, page_presentation_registration, *web_content_connection_id);
+    m_compositor_client->create_context(context_id, page_id, *web_content_connection_id);
 }
 
-ErrorOr<void> Application::try_register_compositor_context(WebContentClient& web_content_client, Web::Compositor::CompositorContextId context_id, Optional<u64> page_id, Web::Compositor::PagePresentationRegistration page_presentation_registration)
+ErrorOr<void> Application::try_register_compositor_context(WebContentClient& web_content_client, Web::Compositor::CompositorContextId context_id, Optional<u64> page_id)
 {
     if (!m_compositor_client)
         return Error::from_string_literal("Compositor process is not available");
@@ -554,7 +594,7 @@ ErrorOr<void> Application::try_register_compositor_context(WebContentClient& web
     }
     VERIFY(web_content_connection_id.has_value());
 
-    auto result = m_compositor_client->try_create_context(context_id, page_id, page_presentation_registration, *web_content_connection_id);
+    auto result = m_compositor_client->try_create_context(context_id, page_id, *web_content_connection_id);
     if (result.is_error())
         return Error::from_string_literal("Compositor process disconnected while creating context");
 
@@ -568,6 +608,15 @@ void Application::update_compositor_viewport(Web::Compositor::CompositorContextI
     VERIFY(m_compositor_client);
 
     m_compositor_client->async_viewport_size_updated(context_id, viewport_size, window_resize_in_progress);
+}
+
+void Application::update_compositor_display_metadata(Web::Compositor::CompositorContextId context_id, Optional<u64> display_id, double refresh_rate)
+{
+    if (!can_send_compositor_process_ipc(m_compositor_client))
+        return;
+    VERIFY(m_compositor_client);
+
+    m_compositor_client->async_set_display_metadata(context_id, display_id, sanitized_display_refresh_rate(refresh_rate));
 }
 
 bool Application::send_async_scroll_to_compositor(Web::Compositor::CompositorContextId context_id, Gfx::FloatPoint position, Gfx::FloatPoint delta_in_device_pixels)
@@ -613,6 +662,17 @@ void Application::notify_compositor_presented_bitmap_ready_to_paint(Web::Composi
     m_compositor_client->async_presented_bitmap_ready_to_paint(context_id, bitmap_id);
 }
 
+void Application::crash_compositor_process()
+{
+    if (!can_send_compositor_process_ipc(m_compositor_client)) {
+        warnln("Unable to crash Compositor process: process is not available");
+        return;
+    }
+    VERIFY(m_compositor_client);
+
+    m_compositor_client->async_crash();
+}
+
 ErrorOr<NonnullRefPtr<WebContentClient>> Application::launch_web_content_process(ViewImplementation& view)
 {
     if (m_spare_web_content_process) {
@@ -624,7 +684,7 @@ ErrorOr<NonnullRefPtr<WebContentClient>> Application::launch_web_content_process
     }
 
     launch_spare_web_content_process();
-    return create_web_content_client(view);
+    return create_web_content_client(view, allocate_page_id());
 }
 
 void Application::launch_spare_web_content_process()
@@ -648,7 +708,7 @@ void Application::launch_spare_web_content_process()
     Core::deferred_invoke([this]() {
         m_has_queued_task_to_launch_spare_web_content_process = false;
 
-        auto web_content_client = create_web_content_client({});
+        auto web_content_client = create_web_content_client({}, allocate_page_id());
         if (web_content_client.is_error()) {
             dbgln("Unable to create spare web content client: {}", web_content_client.error());
             return;
@@ -683,12 +743,14 @@ ErrorOr<void> Application::launch_services()
 
         m_cookie_jar = TRY(CookieJar::create(*m_database));
         m_history_store = TRY(HistoryStore::create(*m_history_database));
+        m_hsts_store = TRY(HSTSStore::create(*m_database));
         m_storage_jar = TRY(StorageJar::create(*m_database));
     } else {
         dbgln_if(WEBVIEW_HISTORY_DEBUG, "[History] SQL history is disabled, disabling browsing history");
 
         m_cookie_jar = CookieJar::create();
         m_history_store = HistoryStore::create_disabled();
+        m_hsts_store = HSTSStore::create();
         m_storage_jar = StorageJar::create();
     }
 
@@ -798,7 +860,7 @@ void Application::recover_compositor_process()
         }
     }
     for (auto& client : clients)
-        client->update_compositor_viewports_after_reconnect({});
+        client->replay_compositor_view_state_after_reconnect({});
     for (auto& client : clients)
         client->notify_compositor_process_reconnected({});
 }
@@ -1173,6 +1235,7 @@ void Application::clear_browsing_data(ClearBrowsingDataOptions const& options)
     if (options.delete_site_data == ClearBrowsingDataOptions::Delete::Yes) {
         m_cookie_jar->expire_cookies_accessed_since(options.since);
         m_storage_jar->remove_items_accessed_since(options.since);
+        m_hsts_store->remove_policies_observed_since(options.since);
     }
 
     if (did_change_history)
@@ -1321,6 +1384,13 @@ void Application::initialize_actions()
     m_motion_menu->add_action(Action::create_checkable("No Preference"sv, ActionID::PreferredMotion, set_motion(Web::CSS::PreferredMotion::NoPreference)));
     m_motion_menu->items().first().get<NonnullRefPtr<Action>>()->set_checked(true);
 
+    m_toggle_vertical_tabs_expanded_action = Action::create("Toggle Vertical Tabs Expanded"sv, ActionID::ToggleVerticalTabsExpanded, [this]() {
+        auto tab_settings = m_settings.tab_settings();
+        tab_settings.vertical_tabs_expanded = !tab_settings.vertical_tabs_expanded;
+        m_settings.set_tab_settings(tab_settings);
+    });
+    update_vertical_tabs_action();
+
     m_bookmarks_menu = Menu::create("Bookmarks"sv);
     m_bookmarks_menu->add_action(Action::create("Manage Bookmarks"sv, ActionID::ManageBookmarks, [this]() {
         open_url_in_new_tab(URL::about_bookmarks(), Web::HTML::ActivateTab::Yes);
@@ -1459,6 +1529,7 @@ void Application::initialize_actions()
     m_inspect_menu->add_action(*m_toggle_devtools_action);
 
     m_debug_menu = Menu::create("Debug"sv);
+    m_debug_menu->set_visible(m_settings.config_variable_as_bool(ConfigVariableID::ShowAdvancedDebugMenu));
     m_debug_menu->add_action(Action::create("Dump Session History Tree"sv, ActionID::DumpSessionHistoryTree, debug_request("dump-session-history"sv)));
     m_debug_menu->add_action(Action::create("Dump DOM Tree"sv, ActionID::DumpDOMTree, debug_request("dump-dom-tree"sv)));
     m_debug_menu->add_action(Action::create("Dump Layout Tree"sv, ActionID::DumpLayoutTree, debug_request("dump-layout-tree"sv)));
@@ -1487,9 +1558,14 @@ void Application::initialize_actions()
 
     m_show_line_box_borders_action = Action::create_checkable("Show Line Box Borders"sv, ActionID::ShowLineBoxBorders, check(m_show_line_box_borders_action, "set-line-box-borders"sv));
     m_debug_menu->add_action(*m_show_line_box_borders_action);
+
+    m_show_caret_hit_test_debug_overlay_action = Action::create_checkable("Show Caret Hit Test Debug Overlay"sv, ActionID::ShowCaretHitTestDebugOverlay, check(m_show_caret_hit_test_debug_overlay_action, "set-caret-hit-test-debug-overlay"sv));
+    m_debug_menu->add_action(*m_show_caret_hit_test_debug_overlay_action);
     m_debug_menu->add_separator();
 
     m_debug_menu->add_action(Action::create("Collect Garbage"sv, ActionID::CollectGarbage, debug_request("collect-garbage"sv)));
+    m_debug_menu->add_action(Action::create("Crash Current Page"sv, ActionID::CrashCurrentPage, debug_request("crash-current-page"sv)));
+    m_debug_menu->add_action(Action::create("Crash Compositor Process"sv, ActionID::CrashCompositorProcess, [this]() { crash_compositor_process(); }));
     m_debug_menu->add_separator();
 
     auto spoof_user_agent_menu = Menu::create_group("Spoof User Agent"sv);
@@ -1532,6 +1608,7 @@ void Application::apply_view_options(Badge<ViewImplementation>, ViewImplementati
     view.set_preferred_motion(m_motion);
 
     view.debug_request("set-line-box-borders"sv, m_show_line_box_borders_action->checked() ? "on"sv : "off"sv);
+    view.debug_request("set-caret-hit-test-debug-overlay"sv, m_show_caret_hit_test_debug_overlay_action->checked() ? "on"sv : "off"sv);
     view.debug_request("scripting"sv, m_enable_scripting_action->checked() ? "on"sv : "off"sv);
     view.debug_request("content-blocking"sv, m_enable_content_blocking_action->checked() ? "on"sv : "off"sv);
     if (m_content_blocker_list_buffer.has_value())
@@ -1539,6 +1616,20 @@ void Application::apply_view_options(Badge<ViewImplementation>, ViewImplementati
     view.debug_request("block-pop-ups"sv, m_block_pop_ups_action->checked() ? "on"sv : "off"sv);
     view.debug_request("spoof-user-agent"sv, m_user_agent_string);
     view.debug_request("navigator-compatibility-mode"sv, m_navigator_compatibility_mode);
+}
+
+void Application::update_vertical_tabs_action()
+{
+    auto const& settings = m_settings.tab_settings();
+    m_toggle_vertical_tabs_expanded_action->set_visible(settings.vertical_tabs_enabled);
+    m_toggle_vertical_tabs_expanded_action->set_engaged(settings.vertical_tabs_expanded);
+    m_toggle_vertical_tabs_expanded_action->set_tooltip(settings.vertical_tabs_expanded ? "Minimize Tabs"sv : "Expand Tabs"sv);
+}
+
+void Application::tab_settings_changed(Badge<ApplicationSettingsObserver>)
+{
+    update_vertical_tabs_action();
+    update_tabs_display();
 }
 
 void Application::update_bookmark_action_for_current_web_view()
@@ -1709,6 +1800,31 @@ Vector<DevTools::CSSProperty> Application::css_property_list() const
     return property_list;
 }
 
+void Application::reload_tab(DevTools::TabDescription const& description, bool) const
+{
+    if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
+        view->reload();
+}
+
+void Application::navigate_tab(DevTools::TabDescription const& description, String const& url) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value())
+        return;
+
+    auto parsed_url = sanitize_url(url, Application::settings().search_engine());
+    if (!parsed_url.has_value())
+        return;
+
+    view->load(*parsed_url);
+}
+
+void Application::traverse_the_history_by_delta(DevTools::TabDescription const& description, int delta) const
+{
+    if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
+        view->traverse_the_history_by_delta(delta);
+}
+
 void Application::inspect_tab(DevTools::TabDescription const& description, OnTabInspectionComplete on_complete) const
 {
     auto view = ViewImplementation::find_view_by_id(description.id);
@@ -1820,6 +1936,24 @@ void Application::clear_inspected_dom_node(DevTools::TabDescription const& descr
 {
     if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
         view->clear_inspected_dom_node();
+}
+
+void Application::start_node_picker(DevTools::TabDescription const& description, OnNodePickerEvent on_node_picker_event) const
+{
+    if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
+        view->start_node_picker(move(on_node_picker_event));
+}
+
+void Application::stop_node_picker(DevTools::TabDescription const& description) const
+{
+    if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
+        view->stop_node_picker();
+}
+
+void Application::clear_node_picker(DevTools::TabDescription const& description) const
+{
+    if (auto view = ViewImplementation::find_view_by_id(description.id); view.has_value())
+        view->clear_node_picker();
 }
 
 void Application::highlight_dom_node(DevTools::TabDescription const& description, Web::UniqueNodeID node_id, Optional<Web::CSS::PseudoElement> pseudo_element) const

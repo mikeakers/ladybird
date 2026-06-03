@@ -1,8 +1,11 @@
 set(SOURCES
     BackingStoreManager.cpp
     CompositorState.cpp
+    ContextState.cpp
     ConnectionFromClient.cpp
     ConnectionFromWebContent.cpp
+    VSyncScheduler.cpp
+    ViewportScrollbarController.cpp
 )
 
 set(GENERATED_SOURCES
@@ -22,6 +25,10 @@ target_include_directories(compositorservice PRIVATE ${LADYBIRD_SOURCE_DIR}/Serv
 
 target_link_libraries(Compositor PRIVATE compositorservice LibCore LibMain LibWebView)
 target_link_libraries(compositorservice PRIVATE LibCore LibGfx LibIPC LibMedia LibSync LibWeb)
+
+if (APPLE)
+    target_link_libraries(Compositor PRIVATE "-framework CoreGraphics" "-framework CoreVideo")
+endif()
 
 if (WIN32)
     target_include_directories(Compositor PRIVATE $<BUILD_INTERFACE:${PTHREAD_INCLUDE_DIR}>)

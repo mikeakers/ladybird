@@ -7,6 +7,7 @@
  */
 
 #include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/StyleValues/ColorSchemeStyleValue.h>
 #include <LibWeb/CSS/SystemColor.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
@@ -15,6 +16,7 @@
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Layout/TextOffsetMapping.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/DisplayListRecordingContext.h>
 #include <LibWeb/Painting/Paintable.h>
@@ -120,16 +122,29 @@ bool Paintable::handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigned, 
     return false;
 }
 
-TraversalDecision Paintable::hit_test(CSSPixelPoint, HitTestType, Function<TraversalDecision(HitTestResult)> const&) const
-{
-    return TraversalDecision::Continue;
-}
-
 bool Paintable::has_stacking_context() const
 {
     if (auto const* paintable_box = as_if<PaintableBox>(this))
         return paintable_box->stacking_context();
     return false;
+}
+
+DOM::Node* HitTestResult::dom_node()
+{
+    for (auto* current = paintable.ptr(); current; current = current->parent()) {
+        if (auto node = current->dom_node())
+            return node;
+    }
+    return nullptr;
+}
+
+DOM::Node const* HitTestResult::dom_node() const
+{
+    for (auto const* current = paintable.ptr(); current; current = current->parent()) {
+        if (auto node = current->dom_node())
+            return node;
+    }
+    return nullptr;
 }
 
 RefPtr<StackingContext> Paintable::enclosing_stacking_context()
@@ -169,9 +184,9 @@ void Paintable::paint_with_inspector_overlay_context(DisplayListRecordingContext
         auto& visual_context_tree = const_cast<ViewportPaintable&>(*viewport_paintable).visual_context_tree();
         auto visual_context_index = paintable_box->accumulated_visual_context_index();
 
-        if (visual_context_index.value()) {
+        if (visual_context_index != VISUAL_VIEWPORT_NODE_INDEX) {
             Vector<VisualContextIndex> relevant_indices;
-            for (auto i = visual_context_index; i.value(); i = visual_context_tree.node_at(i).parent_index) {
+            for (auto i = visual_context_index; i != VISUAL_VIEWPORT_NODE_INDEX; i = visual_context_tree.node_at(i).parent_index) {
                 auto should_keep = visual_context_tree.node_at(i).data.visit(
                     [](ScrollData const&) { return true; },
                     [](ClipData const&) { return false; },
@@ -184,11 +199,11 @@ void Paintable::paint_with_inspector_overlay_context(DisplayListRecordingContext
                     relevant_indices.append(i);
             }
 
-            VisualContextIndex overlay_visual_context_index {};
+            auto overlay_visual_context_index = VISUAL_VIEWPORT_NODE_INDEX;
             for (auto const& source_visual_context_index : relevant_indices.in_reverse())
                 overlay_visual_context_index = visual_context_tree.append(visual_context_tree.node_at(source_visual_context_index).data, overlay_visual_context_index);
 
-            if (overlay_visual_context_index.value())
+            if (overlay_visual_context_index != VISUAL_VIEWPORT_NODE_INDEX)
                 display_list_recorder.set_accumulated_visual_context(overlay_visual_context_index);
         }
     }
@@ -281,19 +296,40 @@ Painting::BorderRadiiData normalize_border_radii_data(Layout::Node const& node, 
 //        fill-color, stroke-width, and CSS custom properties.
 Paintable::SelectionStyle Paintable::selection_style() const
 {
-    auto color_scheme = computed_values().color_scheme();
-    SelectionStyle default_style { CSS::SystemColor::highlight(color_scheme), {}, {}, {} };
+    auto default_style_for_color_scheme = [&](CSS::PreferredColorScheme color_scheme, bool use_palette_for_normal_color_scheme = true) {
+        auto palette = document().page().palette();
+        auto palette_color_scheme = palette.is_dark() ? CSS::PreferredColorScheme::Dark : CSS::PreferredColorScheme::Light;
+        if (color_scheme == palette_color_scheme || use_palette_for_normal_color_scheme) {
+            return SelectionStyle {
+                CSS::SystemColor::transform_selection_background_color(palette.selection()),
+                palette.selection_text(),
+                {},
+                {},
+            };
+        }
+
+        return SelectionStyle {
+            CSS::SystemColor::transform_selection_background_color(CSS::SystemColor::highlight(color_scheme)),
+            CSS::SystemColor::highlight_text(color_scheme),
+            {},
+            {},
+        };
+    };
 
     // For text nodes, check the parent element since text nodes don't have computed properties.
     auto node = dom_node();
     if (!node)
-        return default_style;
+        return default_style_for_color_scheme(computed_values().color_scheme());
 
     DOM::Element const* element = as_if<DOM::Element>(*node);
     if (!element)
         element = node->parent_element();
     if (!element)
-        return default_style;
+        return default_style_for_color_scheme(computed_values().color_scheme());
+
+    auto color_scheme_is_normal = element->computed_properties()->property(CSS::PropertyID::ColorScheme).as_color_scheme().schemes().is_empty();
+    auto use_palette_for_normal_color_scheme = color_scheme_is_normal && !document().supported_color_schemes().has_value();
+    auto default_style = default_style_for_color_scheme(computed_values().color_scheme(), use_palette_for_normal_color_scheme);
 
     auto style_from_element = [&](DOM::Element const& element) -> Optional<SelectionStyle> {
         auto element_layout_node = element.layout_node();

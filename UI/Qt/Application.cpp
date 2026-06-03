@@ -9,6 +9,9 @@
 #include <UI/Qt/Application.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/EventLoopImplementationQt.h>
+#if defined(AK_OS_MACOS)
+#    include <UI/Qt/MacWindow.h>
+#endif
 #include <UI/Qt/Settings.h>
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/WebContentView.h>
@@ -63,6 +66,9 @@ public:
     explicit LadybirdQApplication(Main::Arguments& arguments)
         : QApplication(arguments.argc, arguments.argv)
     {
+#if defined(AK_OS_MACOS)
+        install_appkit_event_capture();
+#endif
         update_chrome_style();
     }
 
@@ -295,6 +301,14 @@ void Application::insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresen
 
     auto* clipboard = QGuiApplication::clipboard();
     clipboard->setMimeData(mime_data);
+}
+
+void Application::update_tabs_display() const
+{
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (auto* window = as_if<BrowserWindow>(widget))
+            window->update_tabs_display();
+    }
 }
 
 void Application::rebuild_bookmarks_menu() const

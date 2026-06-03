@@ -100,6 +100,7 @@ CacheStorage
 CanvasGradient
 CanvasPattern
 CanvasRenderingContext2D
+CaretPosition
 ChannelMergerNode
 ChannelSplitterNode
 CharacterData
@@ -596,4 +597,5 @@ removeTestErrorHandler
 spoofCurrentURL
 test
 timeout
+uniqueLocalhostHostname
 webkitURL

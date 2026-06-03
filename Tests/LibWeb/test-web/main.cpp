@@ -20,6 +20,7 @@
 #include <AK/Function.h>
 #include <AK/LexicalPath.h>
 #include <AK/NumberFormat.h>
+#include <AK/Platform.h>
 #include <AK/QuickSort.h>
 #include <AK/Random.h>
 #include <AK/ScopeGuard.h>
@@ -204,6 +205,28 @@ static ErrorOr<void> collect_ref_tests(Application const& app, Vector<Test>& tes
     return {};
 }
 
+static StringView screenshot_platform_name()
+{
+#if defined(AK_OS_MACOS)
+    return "macos"sv;
+#elif defined(AK_OS_LINUX)
+    return "linux"sv;
+#elif defined(AK_OS_WINDOWS)
+    return "windows"sv;
+#else
+#    error "Unhandled platform for screenshot expectations"
+#endif
+}
+
+static ByteString screenshot_expectation_path(StringView path, StringView trail, StringView name)
+{
+    auto title = LexicalPath::title(name);
+    auto platform_expectation_path = ByteString::formatted("{}/expected-{}/{}/{}.png", path, screenshot_platform_name(), trail, title);
+    if (FileSystem::exists(platform_expectation_path))
+        return platform_expectation_path;
+    return ByteString::formatted("{}/expected/{}/{}.png", path, trail, title);
+}
+
 static void log_active_test_views(StringView reason)
 {
     outln();
@@ -293,7 +316,7 @@ static ErrorOr<void> collect_screenshot_tests(Application const& app, Vector<Tes
         if (!is_valid_test_name(name))
             continue;
 
-        auto expectation_path = ByteString::formatted("{}/expected/{}/{}.png", path, trail, LexicalPath::title(name));
+        auto expectation_path = screenshot_expectation_path(path, trail, name);
         auto relative_path = LexicalPath::relative_path(input_path, app.test_root_path).release_value();
         tests.append({ TestMode::Screenshot, input_path, move(expectation_path), relative_path, relative_path });
     }
@@ -676,10 +699,12 @@ static void run_dump_test(TestWebView& view, TestRunContext& context, Test& test
                 on_test_complete();
         };
 
-        view.on_load_finish = [&view, &context, test_index, on_test_complete, url](auto const& loaded_url) {
-            // We don't want subframe loads to trigger the test finish.
-            if (!url.equals(loaded_url, URL::ExcludeFragment::Yes))
-                return;
+        view.on_load_finish = [&view, &context, test_index, on_test_complete](auto const& loaded_url) {
+            // page_did_finish_loading is already top-level-only (Document.cpp gates it on navigable->is_traversable()).
+            // We accept *any* top-level URL here — not just the test's original URL; otherwise a test that navigates
+            // away will hang forever — because the original page's load IPC may arrive after the navigation target's
+            // signal, and the URL filter will then mask the load event for the new page, too.
+            (void)loaded_url;
 
             auto& test = context.tests[test_index];
             test.did_finish_loading = true;

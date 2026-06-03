@@ -54,8 +54,7 @@ public:
     static size_t client_count() { return s_clients.size(); }
     static Optional<WebContentClient&> client_for_compositor_context_id(Web::Compositor::CompositorContextId);
 
-    explicit WebContentClient(NonnullOwnPtr<IPC::Transport>);
-    WebContentClient(NonnullOwnPtr<IPC::Transport>, ViewImplementation&);
+    WebContentClient(NonnullOwnPtr<IPC::Transport>, u64 initial_page_id);
     ~WebContentClient();
 
     void assign_view(Badge<Application>, ViewImplementation&);
@@ -73,7 +72,7 @@ public:
     void notify_all_views_of_crash();
     ErrorOr<void> reconnect_to_compositor_process(Badge<Application>);
     ErrorOr<void> recreate_compositor_contexts(Badge<Application>);
-    void update_compositor_viewports_after_reconnect(Badge<Application>);
+    void replay_compositor_view_state_after_reconnect(Badge<Application>);
     void notify_compositor_process_reconnected(Badge<Application>);
     Web::Compositor::CompositorContextId compositor_context_id_for_page(u64 page_id);
     Optional<u64> page_id_for_compositor_context_id(Web::Compositor::CompositorContextId) const;
@@ -124,6 +123,7 @@ private:
     virtual void did_inspect_current_flexbox(u64 page_id, String) override;
     virtual void did_inspect_accessibility_tree(u64 page_id, String) override;
     virtual void did_get_hovered_node_id(u64 page_id, Web::UniqueNodeID node_id) override;
+    virtual void did_get_node_id_at_position(u64 page_id, u64 request_id, Web::UniqueNodeID node_id) override;
     virtual void did_finish_editing_dom_node(u64 page_id, Optional<Web::UniqueNodeID> node_id) override;
     virtual void did_mutate_dom(u64 page_id, Mutation) override;
     virtual void did_get_dom_node_html(u64 page_id, String html) override;
@@ -152,13 +152,15 @@ private:
     virtual void did_set_cookie(URL::URL, HTTP::Cookie::ParsedCookie, HTTP::Cookie::Source) override;
     virtual void did_update_cookie(HTTP::Cookie::Cookie) override;
     virtual void did_expire_cookies_with_time_offset(AK::Duration) override;
+    virtual void did_store_hsts_policy(String, HTTP::HSTS::ParsedHSTSPolicy) override;
+    virtual Messages::WebContentClient::DidIsKnownHstsHostResponse did_is_known_hsts_host(String) override;
     virtual Messages::WebContentClient::DidRequestStorageItemResponse did_request_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key, String bottle_key) override;
     virtual Messages::WebContentClient::DidSetStorageItemResponse did_set_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key, String bottle_key, String value) override;
     virtual void did_remove_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key, String bottle_key) override;
     virtual Messages::WebContentClient::DidRequestStorageKeysResponse did_request_storage_keys(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key) override;
     virtual void did_clear_storage(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key) override;
     virtual void did_post_broadcast_channel_message(u64 page_id, Web::HTML::BroadcastChannelMessage message) override;
-    virtual Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(u64 page_id, Web::HTML::ActivateTab, Web::HTML::WebViewHints, Optional<u64> page_index) override;
+    virtual Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(u64 page_id, Web::HTML::ActivateTab, Web::HTML::WebViewHints) override;
     virtual void did_request_activate_tab(u64 page_id) override;
     virtual void did_close_browsing_context(u64 page_id) override;
     virtual void did_change_needs_beforeunload_check(u64 page_id, bool needs_beforeunload_check) override;
@@ -194,20 +196,14 @@ private:
 
     Optional<ViewImplementation&> view_for_page_id(u64, SourceLocation = SourceLocation::current());
 
-    struct CompositorContextRegistration {
-        Optional<u64> page_id;
-        Web::Compositor::PagePresentationRegistration page_presentation_registration { Web::Compositor::PagePresentationRegistration::No };
-    };
-
-    void remember_compositor_context(Web::Compositor::CompositorContextId, Optional<u64> page_id, Web::Compositor::PagePresentationRegistration);
+    void remember_compositor_context(Web::Compositor::CompositorContextId, Optional<u64> page_id);
 
     HashMap<u64, NonnullRawPtr<ViewImplementation>> m_views;
     HashTable<u64> m_detached_pages_pending_close;
-    HashMap<Web::Compositor::CompositorContextId, CompositorContextRegistration> m_compositor_contexts;
-    HashMap<u64, Web::Compositor::CompositorContextId> m_page_compositor_context_ids;
-    HashMap<Web::Compositor::CompositorContextId, u64> m_page_ids_for_compositor_context_ids;
+    HashMap<Web::Compositor::CompositorContextId, Optional<u64>> m_compositor_contexts;
     HashMap<u64, String> m_history_recorded_urls_for_current_load;
     Optional<i32> m_compositor_connection_id;
+    u64 m_initial_page_id { 0 };
 
     ProcessHandle m_process_handle;
     RefPtr<Core::Timer> m_detached_page_close_timer;

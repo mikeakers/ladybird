@@ -327,6 +327,15 @@ EventResult Page::handle_mouseleave()
     return top_level_traversable()->event_handler().handle_mouseleave();
 }
 
+UniqueNodeID Page::node_id_at_position(DevicePixelPoint position)
+{
+    auto node = top_level_traversable()->event_handler().target_node_for_mouse_position(device_to_css_point(position));
+    if (!node)
+        return 0;
+
+    return node->unique_id();
+}
+
 EventResult Page::handle_mousewheel(DevicePixelPoint position, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, double wheel_delta_x, double wheel_delta_y, bool async_scroll_performed_default_action, Optional<AsyncScrollOperation>* async_scroll_operation)
 {
     return top_level_traversable()->event_handler().handle_mousewheel(device_to_css_point(position), device_to_css_point(screen_position), button, buttons, modifiers, wheel_delta_x, wheel_delta_y, async_scroll_performed_default_action, async_scroll_operation);
@@ -342,9 +351,9 @@ EventResult Page::handle_pinch_event(DevicePixelPoint position, unsigned modifie
     return top_level_traversable()->event_handler().handle_pinch_event(device_to_css_point(position), modifiers, scale);
 }
 
-EventResult Page::handle_keydown(UIEvents::KeyCode key, unsigned modifiers, u32 code_point, bool repeat)
+EventResult Page::handle_keydown(UIEvents::KeyCode key, unsigned modifiers, u32 code_point, bool repeat, bool should_insert_text)
 {
-    return focused_navigable().event_handler().handle_keydown(key, modifiers, code_point, repeat);
+    return focused_navigable().event_handler().handle_keydown(key, modifiers, code_point, repeat, should_insert_text);
 }
 
 EventResult Page::handle_keyup(UIEvents::KeyCode key, unsigned modifiers, u32 code_point, bool repeat)

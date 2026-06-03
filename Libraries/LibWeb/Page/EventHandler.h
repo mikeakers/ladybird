@@ -49,8 +49,9 @@ public:
     EventResult handle_mousewheel(CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, double wheel_delta_x, double wheel_delta_y, bool async_scroll_performed_default_action = false, Optional<AsyncScrollOperation>* async_scroll_operation = nullptr);
     EventResult handle_mouseleave();
     void update_hover_after_scroll();
+    GC::Ptr<DOM::Node> target_node_for_mouse_position(CSSPixelPoint);
 
-    EventResult handle_keydown(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
+    EventResult handle_keydown(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat, bool should_insert_text);
     EventResult handle_keyup(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
 
     EventResult handle_drag_and_drop_event(DragEvent::Type, CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, Vector<HTML::SelectedFile> files);
@@ -112,9 +113,9 @@ private:
     void maybe_show_context_menu(GC::Ref<DOM::Node>, MouseEventCoordinates const&, CSSPixelPoint screen_position, CSSPixelPoint viewport_position, unsigned buttons, unsigned modifiers);
     bool maybe_request_paste_for_middle_click(DOM::Document&, CSSPixelPoint visual_viewport_position);
 
-    bool initiate_character_selection(DOM::Document&, Painting::HitTestResult const&, CSS::UserSelect, bool shift_held);
-    bool initiate_word_selection(DOM::Document&, Painting::HitTestResult const&, CSS::UserSelect);
-    bool initiate_paragraph_selection(DOM::Document&, Painting::HitTestResult const&, CSS::UserSelect);
+    bool initiate_character_selection(DOM::Document&, Painting::CaretPosition const&, CSS::UserSelect, bool shift_held);
+    bool initiate_word_selection(DOM::Document&, Painting::CaretPosition const&, CSS::UserSelect);
+    bool initiate_paragraph_selection(DOM::Document&, Painting::CaretPosition const&, CSS::UserSelect);
 
     void update_mouse_selection(CSSPixelPoint visual_viewport_position);
     void apply_mouse_selection(CSSPixelPoint visual_viewport_position);

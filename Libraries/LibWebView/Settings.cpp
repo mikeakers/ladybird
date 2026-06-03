@@ -22,6 +22,11 @@ namespace WebView {
 
 static constexpr auto NEW_TAB_PAGE_URL_KEY = "newTabPageURL"sv;
 
+static constexpr auto TAB_SETTINGS_KEY = "tabs"sv;
+static constexpr auto VERTICAL_TABS_ENABLED_KEY = "verticalTabsEnabled"sv;
+static constexpr auto VERTICAL_TABS_EXPANDED_KEY = "verticalTabsExpanded"sv;
+static constexpr auto VERTICAL_TABS_EXPAND_ON_HOVER_KEY = "verticalTabsExpandOnHover"sv;
+
 static constexpr auto SHOW_BOOKMARKS_BAR_KEY = "showBookmarksBar"sv;
 static constexpr auto DEFAULT_SHOW_BOOKMARKS_BAR = true;
 
@@ -70,12 +75,28 @@ static Array<ConfigVariableDefinition, static_cast<size_t>(ConfigVariableID::Cou
         .array_element_type = {},
     },
     {
+        .id = ConfigVariableID::ShowAdvancedDebugMenu,
+        .name = "debug.ui.show_advanced_debug_menu"sv,
+        .title = "Show Advanced Debug Menu"sv,
+        .description = "Show the advanced Debug menu in the application menu."sv,
+        .default_value = false,
+        .array_element_type = {},
+    },
+    {
         .id = ConfigVariableID::ContentBlockerListPaths,
         .name = "content_blocking.list_paths"sv,
         .title = "Content blocker list paths"sv,
         .description = "Load content blocker lists from these filesystem paths on startup, in order."sv,
         .default_value = JsonArray {},
         .array_element_type = JsonValue::Type::String,
+    },
+    {
+        .id = ConfigVariableID::UseRoundedWindowCorners,
+        .name = "ui.window.use_rounded_corners"sv,
+        .title = "Use rounded window corners"sv,
+        .description = "Clip browser windows to rounded corners."sv,
+        .default_value = true,
+        .array_element_type = {},
     },
 } };
 
@@ -160,6 +181,9 @@ Settings Settings::create(Badge<Application>)
         if (auto parsed_new_tab_page_url = URL::Parser::basic_parse(*new_tab_page_url); parsed_new_tab_page_url.has_value())
             settings.m_new_tab_page_url = parsed_new_tab_page_url.release_value();
     }
+
+    if (auto tab_settings = settings_json.value().get(TAB_SETTINGS_KEY); tab_settings.has_value())
+        settings.m_tab_settings = parse_tab_settings(*tab_settings);
 
     if (auto show_bookmarks_bar = settings_json.value().get_bool(SHOW_BOOKMARKS_BAR_KEY); show_bookmarks_bar.has_value())
         settings.m_show_bookmarks_bar = *show_bookmarks_bar;
@@ -259,6 +283,13 @@ JsonValue Settings::serialize_json() const
 {
     JsonObject settings;
     settings.set(NEW_TAB_PAGE_URL_KEY, m_new_tab_page_url.serialize());
+
+    JsonObject tab_settings;
+    tab_settings.set(VERTICAL_TABS_ENABLED_KEY, m_tab_settings.vertical_tabs_enabled);
+    tab_settings.set(VERTICAL_TABS_EXPANDED_KEY, m_tab_settings.vertical_tabs_expanded);
+    tab_settings.set(VERTICAL_TABS_EXPAND_ON_HOVER_KEY, m_tab_settings.vertical_tabs_expand_on_hover);
+    settings.set(TAB_SETTINGS_KEY, move(tab_settings));
+
     settings.set(SHOW_BOOKMARKS_BAR_KEY, m_show_bookmarks_bar);
     settings.set(DEFAULT_ZOOM_LEVEL_FACTOR_KEY, m_default_zoom_level_factor);
 
@@ -373,6 +404,32 @@ void Settings::set_new_tab_page_url(URL::URL new_tab_page_url)
 
     for (auto& observer : m_observers)
         observer.new_tab_page_url_changed();
+}
+
+TabSettings Settings::parse_tab_settings(JsonValue const& settings)
+{
+    if (!settings.is_object())
+        return {};
+
+    TabSettings tab_settings;
+
+    if (auto vertical_tabs_enabled = settings.as_object().get_bool(VERTICAL_TABS_ENABLED_KEY); vertical_tabs_enabled.has_value())
+        tab_settings.vertical_tabs_enabled = *vertical_tabs_enabled;
+    if (auto vertical_tabs_expanded = settings.as_object().get_bool(VERTICAL_TABS_EXPANDED_KEY); vertical_tabs_expanded.has_value())
+        tab_settings.vertical_tabs_expanded = *vertical_tabs_expanded;
+    if (auto vertical_tabs_expand_on_hover = settings.as_object().get_bool(VERTICAL_TABS_EXPAND_ON_HOVER_KEY); vertical_tabs_expand_on_hover.has_value())
+        tab_settings.vertical_tabs_expand_on_hover = *vertical_tabs_expand_on_hover;
+
+    return tab_settings;
+}
+
+void Settings::set_tab_settings(TabSettings tab_settings)
+{
+    m_tab_settings = tab_settings;
+    persist_settings();
+
+    for (auto& observer : m_observers)
+        observer.tab_settings_changed();
 }
 
 void Settings::set_show_bookmarks_bar(bool show_bookmarks_bar)

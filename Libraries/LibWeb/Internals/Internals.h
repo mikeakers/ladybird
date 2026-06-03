@@ -95,12 +95,17 @@ public:
     static u16 get_echo_server_port();
     static void set_echo_server_port(u16 port);
 
+    void set_hsts_policy(String const& domain, u64 max_age, bool include_sub_domains);
+    void ingest_hsts_header(String const& url, String const& header_value);
+    bool is_known_hsts_host(String const& domain);
+
     void set_browser_zoom(double factor);
     void set_device_pixel_ratio(double ratio);
 
     bool headless();
 
     String dump_display_list();
+    String dump_accessibility_tree();
     String dump_layout_tree(GC::Ref<DOM::Node>);
     String dump_paintable_tree(GC::Ref<DOM::Node>);
     String dump_stacking_context_tree();

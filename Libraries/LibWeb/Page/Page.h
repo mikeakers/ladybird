@@ -23,6 +23,7 @@
 #include <LibGfx/Size.h>
 #include <LibHTTP/Cookie/Cookie.h>
 #include <LibHTTP/Forward.h>
+#include <LibHTTP/HSTS/ParsedHSTSPolicy.h>
 #include <LibHTTP/Header.h>
 #include <LibIPC/Forward.h>
 #include <LibIPC/TransportHandle.h>
@@ -118,12 +119,13 @@ public:
     EventResult handle_mousedown(DevicePixelPoint, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, int click_count);
     EventResult handle_mousemove(DevicePixelPoint, DevicePixelPoint screen_position, unsigned buttons, unsigned modifiers);
     EventResult handle_mouseleave();
+    UniqueNodeID node_id_at_position(DevicePixelPoint);
     EventResult handle_mousewheel(DevicePixelPoint, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, double wheel_delta_x, double wheel_delta_y, bool async_scroll_performed_default_action = false, Optional<AsyncScrollOperation>* async_scroll_operation = nullptr);
 
     EventResult handle_drag_and_drop_event(DragEvent::Type, DevicePixelPoint, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, Vector<HTML::SelectedFile> files);
     EventResult handle_pinch_event(DevicePixelPoint point, unsigned modifiers, double scale);
 
-    EventResult handle_keydown(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
+    EventResult handle_keydown(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat, bool should_insert_text);
     EventResult handle_keyup(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
 
     void handle_sdl_input_events();
@@ -412,6 +414,8 @@ public:
     virtual Page& page() = 0;
     virtual Page const& page() const = 0;
     virtual bool is_connection_open() const = 0;
+    virtual bool has_focus() const { return true; }
+    virtual bool has_active_devtools_client() const { return false; }
     virtual bool is_url_suitable_for_same_process_navigation([[maybe_unused]] URL::URL const& current_url, [[maybe_unused]] URL::URL const& target_url) const { return true; }
     virtual void request_new_process_for_navigation(URL::URL const&) { }
     virtual Gfx::Palette palette() const = 0;
@@ -429,9 +433,7 @@ public:
     {
         if (page_presentation_registration == Compositor::PagePresentationRegistration::Yes)
             return Compositor::compositor_context_id_for_page(id());
-        auto context_id = Compositor::allocate_compositor_context_id();
-        VERIFY(!Compositor::is_page_presenting_compositor_context_id(context_id));
-        return context_id;
+        VERIFY_NOT_REACHED();
     }
     virtual void request_frame() = 0;
     virtual void page_did_change_title(Utf16String const&) { }
@@ -479,6 +481,8 @@ public:
     virtual void page_did_set_cookie(URL::URL const&, HTTP::Cookie::ParsedCookie const&, HTTP::Cookie::Source) { }
     virtual void page_did_update_cookie(HTTP::Cookie::Cookie const&) { }
     virtual void page_did_expire_cookies_with_time_offset(AK::Duration) { }
+    virtual void page_did_store_hsts_policy(String const&, HTTP::HSTS::ParsedHSTSPolicy const&) { }
+    virtual bool page_did_is_known_hsts_host(String const&) { return false; }
     virtual Optional<String> page_did_request_storage_item([[maybe_unused]] Web::StorageAPI::StorageEndpointType storage_endpoint, [[maybe_unused]] String const& storage_key, [[maybe_unused]] String const& bottle_key) { return {}; }
     virtual WebView::StorageSetResult page_did_set_storage_item([[maybe_unused]] Web::StorageAPI::StorageEndpointType storage_endpoint, [[maybe_unused]] String const& storage_key, [[maybe_unused]] String const& bottle_key, [[maybe_unused]] String const& value) { return WebView::StorageOperationError::QuotaExceededError; }
     virtual void page_did_remove_storage_item([[maybe_unused]] Web::StorageAPI::StorageEndpointType storage_endpoint, [[maybe_unused]] String const& storage_key, [[maybe_unused]] String const& bottle_key) { }

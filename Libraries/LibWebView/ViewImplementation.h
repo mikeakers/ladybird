@@ -21,6 +21,7 @@
 #include <LibCore/Forward.h>
 #include <LibCore/Promise.h>
 #include <LibCore/SharedVersion.h>
+#include <LibDevTools/DevToolsDelegate.h>
 #include <LibGfx/Color.h>
 #include <LibGfx/Cursor.h>
 #include <LibGfx/Forward.h>
@@ -94,6 +95,7 @@ public:
     void reset_zoom();
     double zoom_level() const { return m_zoom_level; }
     double device_pixel_ratio() const { return m_device_pixel_ratio; }
+    Optional<u64> display_id() const { return m_display_id; }
     double maximum_frames_per_second() const { return m_maximum_frames_per_second; }
 
     void enqueue_input_event(Web::InputEvent);
@@ -120,6 +122,14 @@ public:
     void inspect_dom_tree();
     void inspect_accessibility_tree();
     void get_hovered_node_id();
+    void start_node_picker(DevTools::DevToolsDelegate::OnNodePickerEvent);
+    void stop_node_picker();
+    void clear_node_picker();
+    bool is_node_picker_active() const { return m_node_picker_active; }
+    void node_picker_hover(Web::DevicePixelPoint);
+    void node_picker_pick(Web::DevicePixelPoint);
+    void node_picker_preview(Web::DevicePixelPoint);
+    void node_picker_cancel();
 
     void inspect_dom_node(Web::UniqueNodeID node_id, DOMNodeProperties::Type, Optional<Web::CSS::PseudoElement> pseudo_element);
     void inspect_grid_layouts(Web::UniqueNodeID root_node_id);
@@ -369,6 +379,7 @@ protected:
 
     double m_zoom_level { 1.0 };
     double m_device_pixel_ratio { 1.0 };
+    Optional<u64> m_display_id;
     double m_maximum_frames_per_second { 60.0 };
 
     RefPtr<Menu> m_page_context_menu;
@@ -447,6 +458,20 @@ protected:
 
     HashMap<u64, NavigationListener> m_navigation_listeners;
     u64 m_next_navigation_listener_id { 1 };
+
+    enum class NodePickerRequestType : u8 {
+        Hovered,
+        Picked,
+        Previewed,
+    };
+    void request_node_picker_hit_test(NodePickerRequestType, Web::DevicePixelPoint);
+    void did_receive_node_picker_hit_test(u64 request_id, Web::UniqueNodeID);
+
+    bool m_node_picker_active { false };
+    Optional<Web::UniqueNodeID> m_node_picker_hovered_node_id;
+    u64 m_next_node_picker_request_id { 1 };
+    HashMap<u64, NodePickerRequestType> m_pending_node_picker_requests;
+    DevTools::DevToolsDelegate::OnNodePickerEvent m_on_node_picker_event;
 
     bool m_devtools_connected { false };
     bool m_needs_beforeunload_check { true };

@@ -39,6 +39,44 @@ struct HideCursor {
     }
 };
 
+static Optional<u64> display_id_for_screen(NSScreen* screen)
+{
+    if (screen == nil)
+        return {};
+
+    NSNumber* screen_number = [[screen deviceDescription] objectForKey:@"NSScreenNumber"];
+    if (screen_number == nil)
+        return {};
+
+    return static_cast<u64>([screen_number unsignedLongLongValue]);
+}
+
+static bool is_browser_reserved_key_equivalent(NSEvent* event)
+{
+    auto modifiers = event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagShift);
+    if (modifiers != NSEventModifierFlagCommand)
+        return false;
+
+    auto* characters = [[event charactersIgnoringModifiers] lowercaseString];
+    if ([characters length] != 1)
+        return false;
+
+    unichar character = [characters characterAtIndex:0];
+    return character == 'l'
+        || character == 'n'
+        || character == 'q'
+        || character == 't'
+        || character == 'w';
+}
+
+static Web::DevicePixelPoint node_picker_position_for(Ladybird::WebViewBridge const& web_view_bridge, Web::DevicePixelPoint widget_position)
+{
+    return {
+        widget_position.x().value() * web_view_bridge.device_pixel_ratio(),
+        widget_position.y().value() * web_view_bridge.device_pixel_ratio(),
+    };
+}
+
 @interface LadybirdWebViewContentLayer : CALayer
 @end
 
@@ -131,8 +169,9 @@ struct HideCursor {
         // This returns device pixel ratio of the screen the window is opened in
         auto device_pixel_ratio = [[NSScreen mainScreen] backingScaleFactor];
         auto maximum_frames_per_second = [[NSScreen mainScreen] maximumFramesPerSecond];
+        auto display_id = display_id_for_screen([NSScreen mainScreen]);
 
-        m_web_view_bridge = MUST(Ladybird::WebViewBridge::create(move(screen_rects), device_pixel_ratio, maximum_frames_per_second));
+        m_web_view_bridge = MUST(Ladybird::WebViewBridge::create(move(screen_rects), device_pixel_ratio, maximum_frames_per_second, display_id));
         [self setWebViewCallbacks];
 
         self.page_context_menu = Ladybird::create_context_menu(self, [self view].page_context_menu());
@@ -203,7 +242,8 @@ struct HideCursor {
 
 - (void)handleDisplayRefreshRateChange
 {
-    m_web_view_bridge->set_maximum_frames_per_second([[[self window] screen] maximumFramesPerSecond]);
+    auto* screen = [[self window] screen];
+    m_web_view_bridge->set_display_metadata([screen maximumFramesPerSecond], display_id_for_screen(screen));
 }
 
 - (void)handleEnteredFullScreen
@@ -912,12 +952,17 @@ struct HideCursor {
     };
 }
 
-- (void)handleCurrentKeyDownEvent
+- (void)handleCurrentKeyDownEvent:(BOOL)shouldInsertText
 {
     if (!self.current_key_down_event)
         return;
 
-    auto key_event = Ladybird::ns_event_to_key_event(Web::KeyEvent::Type::KeyDown, self.current_key_down_event);
+    if (m_web_view_bridge->is_node_picker_active()) {
+        self.current_key_down_event = nil;
+        return;
+    }
+
+    auto key_event = Ladybird::ns_event_to_key_event(Web::KeyEvent::Type::KeyDown, self.current_key_down_event, shouldInsertText);
     m_web_view_bridge->enqueue_input_event(move(key_event));
 
     self.current_key_down_event = nil;
@@ -1114,6 +1159,11 @@ struct HideCursor {
 
 - (void)mouseExited:(NSEvent*)event
 {
+    if (m_web_view_bridge->is_node_picker_active()) {
+        m_web_view_bridge->clear_node_picker();
+        return;
+    }
+
     Web::MouseEvent mouse_event { Web::MouseEvent::Type::MouseLeave, {}, {}, Web::UIEvents::MouseButton::None, Web::UIEvents::MouseButton::None, Web::UIEvents::KeyModifier::Mod_None, 0, 0, 0, nullptr };
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
@@ -1121,11 +1171,19 @@ struct HideCursor {
 - (void)mouseMoved:(NSEvent*)event
 {
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseMove, event, self, Web::UIEvents::MouseButton::None);
+    if (m_web_view_bridge->is_node_picker_active()) {
+        m_web_view_bridge->node_picker_hover(node_picker_position_for(*m_web_view_bridge, mouse_event.position));
+        return;
+    }
+
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
 
 - (void)scrollWheel:(NSEvent*)event
 {
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseWheel, event, self, Web::UIEvents::MouseButton::Middle);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
@@ -1135,17 +1193,31 @@ struct HideCursor {
     [[self window] makeFirstResponder:self];
 
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseDown, event, self, Web::UIEvents::MouseButton::Primary);
+    if (m_web_view_bridge->is_node_picker_active()) {
+        if ((event.modifierFlags & NSEventModifierFlagCommand) != 0)
+            m_web_view_bridge->node_picker_preview(node_picker_position_for(*m_web_view_bridge, mouse_event.position));
+        else
+            m_web_view_bridge->node_picker_pick(node_picker_position_for(*m_web_view_bridge, mouse_event.position));
+        return;
+    }
+
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
 
 - (void)mouseUp:(NSEvent*)event
 {
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseUp, event, self, Web::UIEvents::MouseButton::Primary);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
 
 - (void)mouseDragged:(NSEvent*)event
 {
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseMove, event, self, Web::UIEvents::MouseButton::Primary);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
@@ -1154,18 +1226,27 @@ struct HideCursor {
 {
     [[self window] makeFirstResponder:self];
 
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseDown, event, self, Web::UIEvents::MouseButton::Secondary);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
 
 - (void)rightMouseUp:(NSEvent*)event
 {
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseUp, event, self, Web::UIEvents::MouseButton::Secondary);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
 
 - (void)rightMouseDragged:(NSEvent*)event
 {
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseMove, event, self, Web::UIEvents::MouseButton::Secondary);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
@@ -1177,6 +1258,9 @@ struct HideCursor {
 
     [[self window] makeFirstResponder:self];
 
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseDown, event, self, Web::UIEvents::MouseButton::Middle);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
@@ -1186,6 +1270,9 @@ struct HideCursor {
     if (event.buttonNumber != 2)
         return;
 
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseUp, event, self, Web::UIEvents::MouseButton::Middle);
     m_web_view_bridge->enqueue_input_event(move(mouse_event));
 }
@@ -1193,6 +1280,9 @@ struct HideCursor {
 - (void)otherMouseDragged:(NSEvent*)event
 {
     if (event.buttonNumber != 2)
+        return;
+
+    if (m_web_view_bridge->is_node_picker_active())
         return;
 
     auto mouse_event = Ladybird::ns_event_to_mouse_event(Web::MouseEvent::Type::MouseMove, event, self, Web::UIEvents::MouseButton::Middle);
@@ -1210,6 +1300,9 @@ struct HideCursor {
     if (self.event_being_redispatched == event) {
         return NO;
     }
+    if (is_browser_reserved_key_equivalent(event)) {
+        return NO;
+    }
 
     [self keyDown:event];
     return YES;
@@ -1218,6 +1311,13 @@ struct HideCursor {
 - (void)keyDown:(NSEvent*)event
 {
     if (self.event_being_redispatched == event) {
+        return;
+    }
+
+    if (m_web_view_bridge->is_node_picker_active()) {
+        auto key_event = Ladybird::ns_event_to_key_event(Web::KeyEvent::Type::KeyDown, event);
+        if (key_event.key == Web::UIEvents::KeyCode::Key_Escape)
+            m_web_view_bridge->node_picker_cancel();
         return;
     }
 
@@ -1231,6 +1331,9 @@ struct HideCursor {
         return;
     }
 
+    if (m_web_view_bridge->is_node_picker_active())
+        return;
+
     auto key_event = Ladybird::ns_event_to_key_event(Web::KeyEvent::Type::KeyUp, event);
     m_web_view_bridge->enqueue_input_event(move(key_event));
 }
@@ -1238,6 +1341,11 @@ struct HideCursor {
 - (void)flagsChanged:(NSEvent*)event
 {
     if (self.event_being_redispatched == event) {
+        return;
+    }
+
+    if (m_web_view_bridge->is_node_picker_active()) {
+        m_modifier_flags = event.modifierFlags;
         return;
     }
 
@@ -1288,12 +1396,12 @@ struct HideCursor {
 
 - (void)insertText:(id)string replacementRange:(NSRange)replacementRange
 {
-    [self handleCurrentKeyDownEvent];
+    [self handleCurrentKeyDownEvent:YES];
 }
 
 - (void)doCommandBySelector:(SEL)selector
 {
-    [self handleCurrentKeyDownEvent];
+    [self handleCurrentKeyDownEvent:NO];
 }
 
 - (BOOL)hasMarkedText

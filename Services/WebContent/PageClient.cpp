@@ -28,6 +28,7 @@
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/HTMLLinkElement.h>
+#include <LibWeb/HTML/Navigable.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
@@ -124,7 +125,16 @@ ConnectionFromClient& PageClient::client() const
 
 void PageClient::set_has_focus(bool has_focus)
 {
+    if (m_has_focus == has_focus)
+        return;
+
     m_has_focus = has_focus;
+
+    if (auto document = page().top_level_traversable()->active_document()) {
+        if (has_focus)
+            document->reset_cursor_blink_cycle();
+        document->set_cursor_position_needs_repaint();
+    }
 }
 
 void PageClient::setup_palette()
@@ -627,6 +637,21 @@ void PageClient::page_did_expire_cookies_with_time_offset(AK::Duration offset)
         document->reset_cookie_version();
 }
 
+void PageClient::page_did_store_hsts_policy(String const& domain, HTTP::HSTS::ParsedHSTSPolicy const& policy)
+{
+    client().async_did_store_hsts_policy(domain, policy);
+}
+
+bool PageClient::page_did_is_known_hsts_host(String const& domain)
+{
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidIsKnownHstsHost>(domain);
+    if (!response) {
+        dbgln("WebContent client disconnected during DidIsKnownHstsHost. Exiting peacefully.");
+        exit(0);
+    }
+    return response->result();
+}
+
 Optional<String> PageClient::page_did_request_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String const& storage_key, String const& bottle_key)
 {
     auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidRequestStorageItem>(storage_endpoint, storage_key, bottle_key);
@@ -687,22 +712,18 @@ void PageClient::page_did_update_resource_count(i32 count_waiting)
 
 PageClient::NewWebViewResult PageClient::page_did_request_new_web_view(Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints, Web::HTML::TokenizedFeature::NoOpener no_opener)
 {
-    auto& new_client = m_owner.create_page();
-
-    Optional<u64> page_id;
     if (no_opener == Web::HTML::TokenizedFeature::NoOpener::Yes) {
         // FIXME: Create an abstraction to let this WebContent process know about a new process we create?
         // FIXME: For now, just create a new page in the same process anyway
     }
 
-    page_id = new_client.m_id;
-
-    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidRequestNewWebView>(m_id, activate_tab, hints, page_id);
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidRequestNewWebView>(m_id, activate_tab, hints);
     if (!response) {
         dbgln("WebContent client disconnected during DidRequestNewWebView. Exiting peacefully.");
         exit(0);
     }
 
+    auto& new_client = m_owner.create_page(response->new_page_id());
     return { &new_client.page(), response->take_handle() };
 }
 
@@ -924,13 +945,34 @@ void PageClient::page_did_receive_network_response_body(u64 request_id, Readonly
 
 void PageClient::did_connect_devtools_client()
 {
+    auto was_first_devtools_client = !has_devtools_client();
     ++m_devtools_client_count;
+
+    if (!was_first_devtools_client)
+        return;
+
+    for (auto& navigable : Web::HTML::all_navigables()) {
+        if (&navigable->page() != &page())
+            continue;
+        if (auto active_document = navigable->active_document())
+            active_document->update_layout(Web::DOM::UpdateLayoutReason::InspectDevToolsLayoutData);
+    }
 }
 
 void PageClient::did_disconnect_devtools_client()
 {
     VERIFY(m_devtools_client_count > 0);
     --m_devtools_client_count;
+
+    if (has_devtools_client())
+        return;
+
+    for (auto& navigable : Web::HTML::all_navigables()) {
+        if (&navigable->page() != &page())
+            continue;
+        if (auto active_document = navigable->active_document())
+            active_document->clear_devtools_layout_inspection_data();
+    }
 }
 
 void PageClient::page_did_finish_network_request(u64 request_id, u64 body_size, Requests::RequestTimingInfo const& timing_info, Optional<Requests::NetworkError> const& network_error)

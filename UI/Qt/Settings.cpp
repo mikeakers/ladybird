@@ -7,6 +7,7 @@
  */
 
 #include <AK/LexicalPath.h>
+#include <UI/Qt/ChromeLayout.h>
 #include <UI/Qt/Settings.h>
 #include <UI/Qt/StringUtils.h>
 
@@ -56,13 +57,32 @@ void Settings::set_is_maximized(bool is_maximized)
 
 bool Settings::show_menubar()
 {
+    if (!show_menubar_option_available())
+        return false;
+
     return m_qsettings->value("show_menubar", false).toBool();
 }
 
 void Settings::set_show_menubar(bool show_menubar)
 {
-    m_qsettings->setValue("show_menubar", show_menubar);
+    if (!show_menubar_option_available())
+        show_menubar = false;
+    else
+        m_qsettings->setValue("show_menubar", show_menubar);
+
     emit show_menubar_changed(show_menubar);
+}
+
+Optional<int> Settings::vertical_tabs_expanded_width()
+{
+    if (m_qsettings->contains("vertical_tabs_expanded_width"))
+        return m_qsettings->value("vertical_tabs_expanded_width").toInt();
+    return {};
+}
+
+void Settings::set_vertical_tabs_expanded_width(int width)
+{
+    m_qsettings->setValue("vertical_tabs_expanded_width", width);
 }
 
 }

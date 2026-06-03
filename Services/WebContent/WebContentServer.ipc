@@ -26,6 +26,7 @@
 endpoint WebContentServer
 {
     init_transport(int peer_pid) => (int peer_pid)
+    initialize(u64 initial_page_id) =|
     close_server() =|
 
     get_window_handle(u64 page_id) => (String handle)
@@ -69,6 +70,7 @@ endpoint WebContentServer
     clear_grid_highlight(u64 page_id, Web::UniqueNodeID node_id) =|
     inspect_accessibility_tree(u64 page_id) =|
     get_hovered_node_id(u64 page_id) =|
+    get_node_id_at_position(u64 page_id, u64 request_id, Web::DevicePixelPoint position) =|
 
     js_console_input(u64 page_id, String js_source) =|
     run_javascript(u64 page_id, String js_source) =|

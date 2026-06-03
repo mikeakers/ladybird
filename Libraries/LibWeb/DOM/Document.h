@@ -48,7 +48,9 @@
 #include <LibWeb/HTML/VisibilityState.h>
 #include <LibWeb/InvalidateDisplayList.h>
 #include <LibWeb/Painting/FlexboxInspectorOverlay.h>
+#include <LibWeb/Painting/Forward.h>
 #include <LibWeb/Painting/GridInspectorOverlay.h>
+#include <LibWeb/Painting/HitTestResult.h>
 #include <LibWeb/ResizeObserver/ResizeObserver.h>
 #include <LibWeb/TrustedTypes/InjectionSink.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
@@ -81,6 +83,7 @@ enum class InvalidateLayoutTreeReason {
     X(Debugging)                             \
     X(DocumentElementFromPoint)              \
     X(DocumentElementsFromPoint)             \
+    X(DocumentCaretPositionFromPoint)        \
     X(DocumentFindMatchingText)              \
     X(DocumentSetDesignMode)                 \
     X(DumpDisplayList)                       \
@@ -121,9 +124,9 @@ enum class InvalidateLayoutTreeReason {
     X(HTMLInputElementWidth)                 \
     X(HTMLLabelElementActivationBehavior)    \
     X(HostedDocumentBeforePaint)             \
+    X(InspectAccessibilityTree)              \
     X(InspectDOMTree)                        \
-    X(InspectFlexboxLayout)                  \
-    X(InspectGridLayout)                     \
+    X(InspectDevToolsLayoutData)             \
     X(InternalsHitTest)                      \
     X(MediaQueryListMatches)                 \
     X(NavigableSelectedText)                 \
@@ -396,6 +399,7 @@ public:
     void update_layout(UpdateLayoutReason);
     void update_layout_if_needed_for_node(Node const&, UpdateLayoutReason);
     [[nodiscard]] bool layout_is_up_to_date() const;
+    void clear_devtools_layout_inspection_data();
     void update_paint_and_hit_testing_properties_if_needed();
     void update_animated_style_if_needed();
 
@@ -467,15 +471,10 @@ public:
     }
 
     void add_script_to_execute_when_parsing_has_finished(Badge<HTML::HTMLScriptElement>, HTML::HTMLScriptElement&);
-    Vector<GC::Root<HTML::HTMLScriptElement>> take_scripts_to_execute_when_parsing_has_finished(Badge<HTML::HTMLParser>);
     Vector<GC::Ref<HTML::HTMLScriptElement>>& scripts_to_execute_when_parsing_has_finished() { return m_scripts_to_execute_when_parsing_has_finished; }
 
-    void add_script_to_execute_as_soon_as_possible(Badge<HTML::HTMLScriptElement>, HTML::HTMLScriptElement&);
-    Vector<GC::Root<HTML::HTMLScriptElement>> take_scripts_to_execute_as_soon_as_possible(Badge<HTML::HTMLParser>);
     Vector<GC::Ref<HTML::HTMLScriptElement>>& scripts_to_execute_as_soon_as_possible() { return m_scripts_to_execute_as_soon_as_possible; }
 
-    void add_script_to_execute_in_order_as_soon_as_possible(Badge<HTML::HTMLScriptElement>, HTML::HTMLScriptElement&);
-    Vector<GC::Root<HTML::HTMLScriptElement>> take_scripts_to_execute_in_order_as_soon_as_possible(Badge<HTML::HTMLParser>);
     Vector<GC::Ref<HTML::HTMLScriptElement>>& scripts_to_execute_in_order_as_soon_as_possible() { return m_scripts_to_execute_in_order_as_soon_as_possible; }
 
     QuirksMode mode() const { return m_quirks_mode; }
@@ -502,8 +501,6 @@ public:
     DocumentType const* doctype() const;
     String const& compat_mode() const;
 
-    void set_editable(bool editable) { m_editable = editable; }
-
     // https://html.spec.whatwg.org/multipage/interaction.html#focused-area-of-the-document
     GC::Ptr<Node> focused_area() { return m_focused_area; }
     GC::Ptr<Node const> focused_area() const { return m_focused_area; }
@@ -520,7 +517,6 @@ public:
 
     Vector<GC::Ref<Element>>& autofocus_candidates() { return m_autofocus_candidates; }
     bool autofocus_processed_flag() const { return m_autofocus_processed_flag; }
-    void set_autofocus_processed_flag(bool value) { m_autofocus_processed_flag = value; }
     void flush_autofocus_candidates();
 
     void try_to_scroll_to_the_fragment();
@@ -588,7 +584,6 @@ public:
     String dump_dom_tree_as_json() const;
 
     [[nodiscard]] bool has_a_style_sheet_that_is_blocking_scripts() const;
-    [[nodiscard]] bool has_no_style_sheet_that_is_blocking_scripts() const;
 
     bool is_fully_active() const;
     bool is_active() const;
@@ -701,10 +696,6 @@ public:
 
     // https://html.spec.whatwg.org/multipage/document-lifecycle.html#completely-loaded
     bool is_completely_loaded() const;
-
-    // https://html.spec.whatwg.org/multipage/dom.html#concept-document-navigation-id
-    Optional<String> navigation_id() const;
-    void set_navigation_id(Optional<String>);
 
     // https://html.spec.whatwg.org/multipage/origin.html#active-sandboxing-flag-set
     HTML::SandboxingFlagSet active_sandboxing_flag_set() const;
@@ -973,6 +964,7 @@ public:
 
     InputEventsTarget* active_input_events_target(DOM::Node const* for_node = nullptr);
     GC::Ptr<DOM::Position> cursor_position() const;
+    void set_cursor_position_needs_repaint();
 
     bool cursor_blink_state() const { return m_cursor_blink_state; }
 
@@ -988,6 +980,16 @@ public:
     }
 
     RefPtr<Painting::DisplayList> record_display_list(HTML::PaintConfig, Painting::DisplayListResourceStorage&);
+    Painting::HitTestDisplayList const* hit_test_display_list() const { return m_hit_test_display_list.ptr(); }
+    Painting::HitTestDisplayList const* ensure_hit_test_display_list();
+    Optional<Painting::HitTestResult> hit_test(CSSPixelPoint, Painting::HitTestType);
+    Optional<Painting::CaretPosition> caret_position_from_point(CSSPixelPoint);
+    Optional<Painting::CaretPosition> caret_position_from_point_for_selection_start(CSSPixelPoint);
+    Optional<Painting::CaretPosition> caret_position_from_point_for_selection(CSSPixelPoint);
+    GC::Ptr<CaretPosition> caret_position_from_point(double x, double y, Bindings::CaretPositionFromPointOptions const&);
+    TraversalDecision hit_test_all(CSSPixelPoint, Function<TraversalDecision(Painting::HitTestResult)> const&);
+
+    void set_caret_hit_test_debug_rect(Optional<CSSPixelRect>);
 
     void set_needs_to_record_display_list();
 
@@ -1258,8 +1260,6 @@ private:
     // https://dom.spec.whatwg.org/#concept-document-type
     Type m_type { Type::XML };
 
-    bool m_editable { false };
-
     // https://html.spec.whatwg.org/multipage/interaction.html#focused-area-of-the-document
     GC::Ptr<Node> m_focused_area;
 
@@ -1294,8 +1294,6 @@ private:
 
     GC::Ptr<DOMImplementation> m_implementation;
     GC::Ptr<HTML::HTMLScriptElement> m_current_script;
-
-    bool m_should_invalidate_styles_on_attribute_changes { true };
 
     u32 m_ignore_destructive_writes_counter { 0 };
 
@@ -1487,6 +1485,8 @@ private:
 
     bool m_needs_accumulated_visual_contexts_update { false };
     bool m_needs_invalidation_of_elements_affected_by_has { false };
+    RefPtr<Painting::HitTestDisplayList> m_hit_test_display_list;
+    Optional<CSSPixelRect> m_caret_hit_test_debug_rect;
 
     mutable StyleInvalidationCounters m_style_invalidation_counters;
     mutable u64 m_style_invalidations_since_last_counter_dump { 0 };
