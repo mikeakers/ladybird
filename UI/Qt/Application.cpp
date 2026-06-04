@@ -143,9 +143,9 @@ BrowserWindow& Application::new_window(Vector<URL::URL> const& initial_urls, Win
 {
     auto* window = new BrowserWindow(initial_urls, is_popup_window, parent_tab, move(page_index));
     set_active_window(*window);
-    if (initial_urls.is_empty()) {
-        auto* tab = window->current_tab();
-        if (tab) {
+
+    if (initial_urls.size() == 1 && initial_urls.first() == URL::about_newtab()) {
+        if (auto* tab = window->current_tab()) {
             tab->set_url_is_hidden(true);
             tab->focus_location_editor();
         }
@@ -316,14 +316,6 @@ void Application::rebuild_bookmarks_menu() const
     for (auto* widget : QApplication::topLevelWidgets()) {
         if (auto* window = as_if<BrowserWindow>(widget))
             window->rebuild_bookmarks_menu();
-    }
-}
-
-void Application::update_bookmarks_bar_display(bool show_bookmarks_bar) const
-{
-    for (auto* widget : QApplication::topLevelWidgets()) {
-        if (auto* window = as_if<BrowserWindow>(widget))
-            window->update_bookmarks_bar_display(show_bookmarks_bar);
     }
 }
 

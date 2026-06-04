@@ -16,6 +16,7 @@
 #include <AK/Function.h>
 #include <AK/HashMap.h>
 #include <AK/Math.h>
+#include <AK/NeverDestroyed.h>
 #include <AK/NonnullRawPtr.h>
 #include <AK/QuickSort.h>
 #include <LibGfx/Font/FontDatabase.h>
@@ -158,10 +159,10 @@ void StyleComputer::visit_edges(Visitor& visitor)
 
 Optional<String> StyleComputer::user_agent_style_sheet_source(StringView name)
 {
-    extern String default_stylesheet_source;
-    extern String quirks_mode_stylesheet_source;
-    extern String mathml_stylesheet_source;
-    extern String svg_stylesheet_source;
+    extern String const& default_stylesheet_source;
+    extern String const& quirks_mode_stylesheet_source;
+    extern String const& mathml_stylesheet_source;
+    extern String const& svg_stylesheet_source;
 
     if (name == "CSS/Default.css"sv)
         return default_stylesheet_source;
@@ -362,7 +363,7 @@ static Optional<ResolvedScope> resolve_scope(DOM::AbstractElement abstract_eleme
     return resolve_scope_chain(abstract_element, rule, shadow_host, rule_root, *rule.scope_rule);
 }
 
-Vector<StyleComputer::ScopedMatchingRule> StyleComputer::collect_matching_rules_from_context(DOM::AbstractElement abstract_element, CascadeOrigin cascade_origin, GC::Ptr<DOM::ShadowRoot const> context_shadow_root, PseudoClassBitmap& attempted_pseudo_class_matches, Optional<FlyString const> qualified_layer_name) const
+Vector<StyleComputer::ScopedMatchingRule> StyleComputer::collect_matching_rules_from_context(DOM::AbstractElement abstract_element, CascadeOrigin cascade_origin, GC::Ptr<DOM::ShadowRoot const> context_shadow_root, Optional<FlyString const> qualified_layer_name) const
 {
     auto const& root_node = abstract_element.element().root();
     auto shadow_root = as_if<DOM::ShadowRoot>(root_node);
@@ -525,9 +526,6 @@ Vector<StyleComputer::ScopedMatchingRule> StyleComputer::collect_matching_rules_
             .rule_shadow_root = rule_root,
             .collect_per_element_selector_involvement_metadata = true,
             .has_result_cache = m_has_result_cache.ptr(),
-        };
-        ScopeGuard guard = [&] {
-            attempted_pseudo_class_matches |= context.attempted_pseudo_class_matches;
         };
         if (!SelectorEngine::matches(selector, abstract_element, shadow_host_to_use, context, resolved_scope->root))
             continue;
@@ -1402,7 +1400,7 @@ void StyleComputer::start_needed_transitions(ComputedProperties const& previous_
     }
 }
 
-StyleComputer::MatchingRuleSet StyleComputer::build_matching_rule_set(DOM::AbstractElement abstract_element, PseudoClassBitmap& attempted_pseudo_class_matches, bool& did_match_any_pseudo_element_rules, ComputeStyleMode mode) const
+StyleComputer::MatchingRuleSet StyleComputer::build_matching_rule_set(DOM::AbstractElement abstract_element, bool& did_match_any_pseudo_element_rules, ComputeStyleMode mode) const
 {
     auto collect_author_contexts = [&] {
         Vector<GC::Ptr<DOM::ShadowRoot const>, 4> context_shadow_roots;
@@ -1454,12 +1452,12 @@ StyleComputer::MatchingRuleSet StyleComputer::build_matching_rule_set(DOM::Abstr
             };
 
             for (auto const& layer_name : context_style_scope.m_rule_cache->qualified_layer_names_in_order) {
-                auto layer_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::Author, shadow_root, attempted_pseudo_class_matches, layer_name);
+                auto layer_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::Author, shadow_root, layer_name);
                 sort_matching_rules(layer_rules);
                 context.author_rules.append({ layer_name, layer_rules });
             }
 
-            auto unlayered_author_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::Author, shadow_root, attempted_pseudo_class_matches);
+            auto unlayered_author_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::Author, shadow_root);
             sort_matching_rules(unlayered_author_rules);
             context.author_rules.append({ {}, unlayered_author_rules });
 
@@ -1471,9 +1469,9 @@ StyleComputer::MatchingRuleSet StyleComputer::build_matching_rule_set(DOM::Abstr
 
     // First, we collect all the CSS rules whose selectors match `element`:
     MatchingRuleSet matching_rule_set;
-    matching_rule_set.user_agent_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::UserAgent, nullptr, attempted_pseudo_class_matches);
+    matching_rule_set.user_agent_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::UserAgent, nullptr);
     sort_matching_rules(matching_rule_set.user_agent_rules);
-    matching_rule_set.user_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::User, nullptr, attempted_pseudo_class_matches);
+    matching_rule_set.user_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::User, nullptr);
     sort_matching_rules(matching_rule_set.user_rules);
     matching_rule_set.author_contexts = collect_author_contexts();
 
@@ -2096,8 +2094,7 @@ GC::Ptr<ComputedProperties> StyleComputer::compute_style_impl(DOM::AbstractEleme
 
     // 1. Perform the cascade. This produces the "specified style"
     bool did_match_any_pseudo_element_rules = false;
-    PseudoClassBitmap attempted_pseudo_class_matches;
-    auto matching_rule_set = build_matching_rule_set(abstract_element, attempted_pseudo_class_matches, did_match_any_pseudo_element_rules, mode);
+    auto matching_rule_set = build_matching_rule_set(abstract_element, did_match_any_pseudo_element_rules, mode);
 
     if (mode == ComputeStyleMode::CreatePseudoElementStyleIfNeeded) {
         // NOTE: If we're computing style for a pseudo-element, we look for a number of reasons to bail early.
@@ -2197,14 +2194,13 @@ GC::Ptr<ComputedProperties> StyleComputer::compute_style_impl(DOM::AbstractEleme
     }
 
     auto computed_properties = compute_properties(abstract_element, cascaded_properties);
-    computed_properties->set_attempted_pseudo_class_matches(attempted_pseudo_class_matches);
 
     if (did_change_custom_properties.has_value()) {
         auto new_custom_property_data = abstract_element.custom_property_data();
         if (old_custom_property_data.ptr() != new_custom_property_data.ptr()) {
-            static OrderedHashMap<FlyString, StyleProperty> const empty_own_values;
-            auto const& old_own = old_custom_property_data ? old_custom_property_data->own_values() : empty_own_values;
-            auto const& new_own = new_custom_property_data ? new_custom_property_data->own_values() : empty_own_values;
+            static NeverDestroyed<OrderedHashMap<FlyString, StyleProperty>> empty_own_values;
+            auto const& old_own = old_custom_property_data ? old_custom_property_data->own_values() : *empty_own_values;
+            auto const& new_own = new_custom_property_data ? new_custom_property_data->own_values() : *empty_own_values;
             if (old_own != new_own)
                 *did_change_custom_properties = true;
         }
@@ -2240,8 +2236,8 @@ RefPtr<StyleValue const> StyleComputer::recascade_font_size_if_needed(DOM::Abstr
 
     // FIXME: This should be configurable.
     constexpr CSSPixels default_monospace_font_size_in_px = 13;
-    static auto monospace_font_family_name = Platform::FontPlugin::the().generic_font_name(Platform::GenericFont::Monospace, 400, 0);
-    static auto monospace_font = Gfx::FontDatabase::the().get(monospace_font_family_name, default_monospace_font_size_in_px * 0.75f, 400, Gfx::FontWidth::Normal, 0);
+    static auto const& monospace_font_family_name = *new String(Platform::FontPlugin::the().generic_font_name(Platform::GenericFont::Monospace, 400, 0));
+    static auto const& monospace_font = Gfx::FontDatabase::the().get(monospace_font_family_name, default_monospace_font_size_in_px * 0.75f, 400, Gfx::FontWidth::Normal, 0).release_nonnull().leak_ref();
 
     // Reconstruct the line of ancestor elements we need to inherit style from, and then do the cascade again
     // but only for the font-size property.
@@ -2310,7 +2306,7 @@ RefPtr<StyleValue const> StyleComputer::recascade_font_size_if_needed(DOM::Abstr
         bool did_resolve_viewport_relative_length = false;
         Length::ResolutionContext resolution_context {
             .viewport_rect = viewport_rect(),
-            .font_metrics = { current_size_in_px, monospace_font->with_size(current_size_in_px * 0.75f)->pixel_metrics(), inherited_line_height },
+            .font_metrics = { current_size_in_px, monospace_font.with_size(current_size_in_px * 0.75f)->pixel_metrics(), inherited_line_height },
             .root_font_metrics = m_root_element_font_metrics,
             .font_metrics_depend_on_viewport_metrics = current_size_depends_on_viewport_metrics || inherited_font_metrics_depend_on_viewport_metrics,
             .root_font_metrics_depend_on_viewport_metrics = m_root_element_font_metrics_depend_on_viewport_metrics,
@@ -2869,7 +2865,7 @@ NonnullRefPtr<StyleValue const> StyleComputer::compute_corner_shape(NonnullRefPt
     case Keyword::Round:
         // The corner shape is a quarter of a convex ellipse. Equivalent to superellipse(1).
         // NB: We cache this value since 'round' is the initial value of the `corner-*-*-shape` properties
-        static NonnullRefPtr<StyleValue const> const cached_round_value = SuperellipseStyleValue::create(NumberStyleValue::create(1));
+        static auto const& cached_round_value = SuperellipseStyleValue::create(NumberStyleValue::create(1)).leak_ref();
         return cached_round_value;
     case Keyword::Squircle:
         // The corner shape is a quarter of a "squircle", a convex curve between round and square. Equivalent to superellipse(2).
