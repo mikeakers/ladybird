@@ -579,9 +579,9 @@ void ViewImplementation::did_receive_node_picker_hit_test(u64 request_id, Web::U
     });
 }
 
-void ViewImplementation::inspect_dom_node(Web::UniqueNodeID node_id, DOMNodeProperties::Type property_type, Optional<Web::CSS::PseudoElement> pseudo_element)
+void ViewImplementation::inspect_dom_node(Web::UniqueNodeID node_id, DOMNodeProperties::Type property_type, Optional<Web::CSS::PseudoElement> pseudo_element, JsonValue options)
 {
-    client().async_inspect_dom_node(page_id(), property_type, node_id, pseudo_element);
+    client().async_inspect_dom_node(page_id(), property_type, node_id, pseudo_element, move(options));
 }
 
 void ViewImplementation::inspect_grid_layouts(Web::UniqueNodeID root_node_id)
@@ -1062,8 +1062,13 @@ static ErrorOr<LexicalPath> save_screenshot(Gfx::Bitmap const* bitmap)
     if (!bitmap)
         return Error::from_string_literal("Failed to take a screenshot");
 
-    auto file = AK::UnixDateTime::now().to_byte_string("screenshot-%Y-%m-%d-%H-%M-%S.png"sv);
-    auto path = TRY(Application::the().path_for_downloaded_file(file));
+    auto path = TRY([] -> ErrorOr<LexicalPath> {
+        if (auto const& screenshot_path = Application::browser_options().screenshot_path; screenshot_path.has_value())
+            return LexicalPath { *screenshot_path };
+
+        auto file = AK::UnixDateTime::now().to_byte_string("screenshot-%Y-%m-%d-%H-%M-%S.png"sv);
+        return Application::the().path_for_downloaded_file(file);
+    }());
 
     auto encoded = TRY(Gfx::PNGWriter::encode(*bitmap));
 
@@ -1190,12 +1195,6 @@ ErrorOr<LexicalPath> ViewImplementation::dump_gc_graph()
 void ViewImplementation::set_user_style_sheet(String const& source)
 {
     client().async_set_user_style(page_id(), source);
-}
-
-void ViewImplementation::use_native_user_style_sheet()
-{
-    extern String const& native_stylesheet_source;
-    set_user_style_sheet(native_stylesheet_source);
 }
 
 void ViewImplementation::initialize_context_menus()

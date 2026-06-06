@@ -6,10 +6,13 @@
 
 #include <AK/ByteString.h>
 #include <AK/Checked.h>
+#include <AK/LexicalPath.h>
+#include <AK/NeverDestroyed.h>
 #include <AK/Platform.h>
 #include <AK/ScopeGuard.h>
 #include <CraneliftFFI.h>
 #include <LibCore/Process.h>
+#include <LibCore/System.h>
 #include <LibWasm/AbstractMachine/BytecodeInterpreter.h>
 #include <LibWasm/AbstractMachine/Configuration.h>
 #include <LibWasm/Printer/Printer.h>
@@ -256,12 +259,12 @@ static bool install_compiled_function(CompiledInstructions& target, ReadonlyByte
     for (auto const& trap : traps)
         handle->traps.unchecked_append(trap);
 
-    target.dispatches[0].handler_ptr = bit_cast<FlatPtr>(func_ptr);
     target.cranelift_code_handle = handle;
     target.cranelift_code_size = code_size;
     target.cranelift_traps = handle->traps.data();
     target.cranelift_trap_count = handle->traps.size();
     target.cranelift_compiled = true;
+    publish_cranelift_entry(target, bit_cast<FlatPtr>(func_ptr));
     return true;
 }
 
@@ -278,7 +281,7 @@ static ALWAYS_INLINE i32 wasm_cl_finish_call(BytecodeInterpreter& interpreter, C
 
     if (auto* wasm_function = instance->get_pointer<WasmFunction>(); wasm_function
         && !config.should_limit_instruction_count()
-        && wasm_function->code().func().body().compiled_instructions.cranelift_compiled) {
+        && cranelift_entry_acquire(wasm_function->code().func().body().compiled_instructions) != 0) {
 
         // Fast compiled-to-compiled call: stack-allocate locals + non-owning frame.
         auto& func = wasm_function->code().func();
@@ -310,7 +313,7 @@ static ALWAYS_INLINE i32 wasm_cl_finish_call(BytecodeInterpreter& interpreter, C
             auto const* cc = ci.dispatches.data();
             auto const* addrs = ci.src_dst_mappings.data();
             using HandlerFn = Outcome (*)(BytecodeInterpreter&, Configuration&, Instruction const*, u32, Dispatch const*, SourcesAndDestination const*);
-            auto const handler = bit_cast<HandlerFn>(cc[0].handler_ptr);
+            auto const handler = bit_cast<HandlerFn>(cranelift_entry_acquire(ci));
             auto outcome = handler(interpreter, config, cc[0].instruction, 0, cc, addrs);
 
             if (outcome != Outcome::Return) {
@@ -1103,6 +1106,33 @@ static CraneliftInsn serialize_insn(Dispatch const& dispatch, SourcesAndDestinat
     return out;
 }
 
+static StringView resolve_cranelift_compiler_path()
+{
+    // Lookup order: LADYBIRD_CRANELIFT_COMPILER, compile-time path, sibling-of-self.
+    static NeverDestroyed<ByteString> s_path = []() -> ByteString {
+        auto file_exists = [](ByteString const& path) {
+            return !Core::System::stat(path).is_error();
+        };
+
+        if (auto const* env = getenv("LADYBIRD_CRANELIFT_COMPILER"); env && *env) {
+            if (file_exists(env))
+                return ByteString { env };
+        }
+
+        if (file_exists(WASM_CRANELIFT_COMPILER_PATH))
+            return WASM_CRANELIFT_COMPILER_PATH;
+
+        if (auto self_path = Core::System::current_executable_path(); !self_path.is_error()) {
+            auto sibling = LexicalPath::join(LexicalPath::dirname(self_path.value()), "cranelift-compiler"sv).string();
+            if (file_exists(sibling))
+                return sibling;
+        }
+
+        return WASM_CRANELIFT_COMPILER_PATH;
+    }();
+    return s_path->view();
+}
+
 static void try_cranelift_compile_batch(Vector<BatchInput>& batch)
 {
     if (batch.is_empty())
@@ -1214,7 +1244,7 @@ static void try_cranelift_compile_batch(Vector<BatchInput>& batch)
 
     auto process_result = Core::Process::spawn({
         .name = "cranelift-compiler"sv,
-        .executable = WASM_CRANELIFT_COMPILER_PATH,
+        .executable = resolve_cranelift_compiler_path(),
         .arguments = arguments,
     });
     if (process_result.is_error())
@@ -1419,6 +1449,9 @@ bool try_cranelift_compile(CompiledInstructions& compiled, u32 result_arity)
     flat.ensure_capacity(dispatches.size());
     for (size_t i = 0; i < dispatches.size(); ++i) {
         flat.append(serialize_insn(dispatches[i], addresses[i]));
+
+        if (dispatches[i].instruction->opcode().value() == Instructions::synthetic_tier_up.value())
+            flat.last().imm1 = static_cast<i64>(i);
 
         if (dispatches[i].instruction->opcode().value() == Instructions::br_table.value()) {
             auto const& table_args = dispatches[i].instruction->arguments().get<Instruction::TableBranchArgs>();
