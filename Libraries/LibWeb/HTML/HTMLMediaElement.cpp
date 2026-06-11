@@ -153,7 +153,12 @@ void HTMLMediaElement::queue_a_media_element_task(Function<void()> steps)
 {
     // To queue a media element task with a media element element and a series of steps steps, queue an element task on the media element's
     // media element event task source given element and steps.
-    queue_an_element_task(media_element_event_task_source(), move(steps));
+    queue_an_element_task(media_element_event_task_source(), [element = GC::Weak { *this }, steps = move(steps)]() mutable {
+        auto self = element.ptr();
+        if (!self || !self->document().is_fully_active())
+            return;
+        steps();
+    });
 }
 
 void HTMLMediaElement::visit_edges(Cell::Visitor& visitor)
@@ -251,6 +256,14 @@ void HTMLMediaElement::removed_from(IsSubtreeRoot is_subtree_root, DOM::Node* ol
 
     // 3. ⌛ Run the internal pause steps for the media element.
     pause_element();
+}
+
+void HTMLMediaElement::adopted_from(DOM::Document& old_document)
+{
+    Base::adopted_from(old_document);
+
+    if (m_delaying_the_load_event.has_value())
+        m_delaying_the_load_event.emplace(document());
 }
 
 void HTMLMediaElement::cancel_the_fetching_process()
@@ -1781,6 +1794,8 @@ void HTMLMediaElement::set_up_playback_manager_for_remote()
     m_playback_manager = Media::PlaybackManager::create();
     m_playback_manager->set_audio_output_disabled(document().page().client().is_headless());
 
+    m_playback_manager->set_playback_rate(static_cast<float>(m_playback_rate));
+
     m_has_enabled_preferred_audio_track = false;
     m_has_selected_preferred_video_track = false;
 
@@ -1855,6 +1870,8 @@ void HTMLMediaElement::set_up_playback_manager_for_local()
 {
     m_playback_manager = Media::PlaybackManager::create();
     m_playback_manager->set_audio_output_disabled(document().page().client().is_headless());
+
+    m_playback_manager->set_playback_rate(static_cast<float>(m_playback_rate));
 
     m_has_enabled_preferred_audio_track = false;
     m_has_selected_preferred_video_track = false;
@@ -2588,9 +2605,8 @@ WebIDL::ExceptionOr<void> HTMLMediaElement::set_playback_rate(double new_value)
     // on setting, the user agent must follow these steps:
 
     // 1. If the given value is not supported by the user agent, then throw a "NotSupportedError" DOMException.
-    // FIXME: We need to support playback rates other than 1 for this to be even remotely useful.
-    if (new_value != 1.0)
-        return WebIDL::NotSupportedError::create(realm(), "Playback rates other than 1 are not supported."_utf16);
+    if (!isfinite(new_value) || new_value < 0.0 || new_value > 64.0)
+        return WebIDL::NotSupportedError::create(realm(), "Playback rate is outside of the supported range."_utf16);
 
     // When the defaultPlaybackRate or playbackRate attributes change value (either by being set by script or by being changed directly by the user agent, e.g. in response to user
     // control), the user agent must queue a media element task given the media element to fire an event named ratechange at the media element.
@@ -2602,9 +2618,11 @@ WebIDL::ExceptionOr<void> HTMLMediaElement::set_playback_rate(double new_value)
 
     // 2. Set playbackRate to the new value, and if the element is potentially playing, change the playback speed.
     m_playback_rate = new_value;
-    if (potentially_playing()) {
-        // FIXME: Do this once playback speeds other than 1 are supported.
-    }
+    // AD-HOC: Set the playback rate even when not potentially playing. The spec mandates that the media time advances
+    //         by playbackRate units of media time per unit time on the clock. There's no reason this shouldn't be set
+    //         always.
+    if (m_playback_manager)
+        m_playback_manager->set_playback_rate(static_cast<float>(new_value));
 
     return {};
 }

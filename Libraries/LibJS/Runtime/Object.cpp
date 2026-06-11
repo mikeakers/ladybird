@@ -51,7 +51,7 @@ static Value* allocate_heap_named_storage(u32 capacity)
 {
     VERIFY(capacity > Object::INLINE_NAMED_PROPERTY_CAPACITY);
     auto allocation_size = HEAP_STORAGE_HEADER_SIZE + capacity * sizeof(Value);
-    auto* raw = static_cast<u8*>(kmalloc(allocation_size));
+    auto* raw = static_cast<u8*>(kmalloc(HeapPartition::JSObjectStorage, allocation_size));
     VERIFY(raw);
     *reinterpret_cast<u32*>(raw) = capacity;
     return reinterpret_cast<Value*>(raw + HEAP_STORAGE_HEADER_SIZE);
@@ -90,6 +90,7 @@ void Object::ensure_named_storage_capacity(u32 needed)
         m_named_properties = new_storage;
     } else {
         auto* raw = static_cast<u8*>(krealloc(
+            HeapPartition::JSObjectStorage,
             reinterpret_cast<u8*>(m_named_properties) - HEAP_STORAGE_HEADER_SIZE,
             HEAP_STORAGE_HEADER_SIZE + new_capacity * sizeof(Value)));
         VERIFY(raw);
@@ -554,6 +555,42 @@ ThrowCompletionOr<void> Object::copy_data_properties(VM& vm, Value source, HashT
 
     // 2. Let from be ! ToObject(source).
     auto from = MUST(source.to_object(vm));
+
+    // OPTIMIZATION: For ordinary objects we can iterate the shape directly and read values by storage
+    //               offset, avoiding repeated property lookups through DescriptorArray::find.
+    if (from->eligible_for_own_property_enumeration_fast_path()
+        && !from->has_intrinsic_accessors()
+        && !from->may_interfere_with_indexed_property_access()
+        && excluded_values.is_empty()
+        && from->indexed_storage_kind() <= IndexedStorageKind::Packed) {
+
+        bool has_accessors = false;
+        from->shape().for_each_property_in_insertion_order([&](auto const&, auto const& metadata) {
+            if (metadata.attributes.is_enumerable() && from->get_direct(metadata.offset).is_accessor()) {
+                has_accessors = true;
+                return IterationDecision::Break;
+            }
+            return IterationDecision::Continue;
+        });
+
+        if (!has_accessors) {
+            for (u32 i = 0; i < from->indexed_array_like_size(); ++i) {
+                if (!excluded_keys.is_empty() && excluded_keys.contains(PropertyKey(i)))
+                    continue;
+                MUST(create_data_property_or_throw(PropertyKey(i), from->m_indexed_elements[i]));
+            }
+
+            from->shape().for_each_property_in_insertion_order([&](auto const& property_key, auto const& metadata) {
+                if (!metadata.attributes.is_enumerable())
+                    return;
+                if (!excluded_keys.is_empty() && excluded_keys.contains(property_key))
+                    return;
+                MUST(create_data_property_or_throw(property_key, from->get_direct(metadata.offset)));
+            });
+
+            return {};
+        }
+    }
 
     // 3. Let keys be ? from.[[OwnPropertyKeys]]().
     auto keys = TRY(from->internal_own_property_keys());
@@ -1762,7 +1799,7 @@ static Value* allocate_indexed_elements(u32 capacity)
 {
     // Layout: [u32 capacity] [u32 padding] [Value 0] [Value 1] ...
     auto allocation_size = sizeof(u64) + capacity * sizeof(Value);
-    auto* raw = static_cast<u8*>(kmalloc(allocation_size));
+    auto* raw = static_cast<u8*>(kmalloc(HeapPartition::JSObjectStorage, allocation_size));
     VERIFY(raw);
     *reinterpret_cast<u32*>(raw) = capacity;
     *reinterpret_cast<u32*>(raw + sizeof(u32)) = 0; // padding

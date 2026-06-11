@@ -177,10 +177,10 @@ private:
     virtual void did_request_file_picker(u64 page_id, Web::HTML::FileFilter accepted_file_types, Web::HTML::AllowMultipleFiles) override;
     virtual void did_request_select_dropdown(u64 page_id, Gfx::IntPoint content_position, i32 minimum_width, Vector<Web::HTML::SelectItem> items) override;
     virtual void did_finish_handling_input_event(u64 page_id, Web::EventResult event_result) override;
+    virtual void did_update_input_caret_rect(u64 page_id, Optional<Web::DevicePixelRect> rect) override;
     virtual void did_finish_test(u64 page_id, String text) override;
     virtual void did_set_test_timeout(u64 page_id, double milliseconds) override;
     virtual void did_receive_reference_test_metadata(u64 page_id, JsonValue) override;
-    virtual void did_receive_test_variant_metadata(u64 page_id, JsonValue) override;
     virtual void did_set_browser_zoom(u64 page_id, double factor) override;
     virtual void did_find_in_page(u64 page_id, size_t current_match_index, Optional<size_t> total_match_count) override;
     virtual void did_change_theme_color(u64 page_id, Gfx::Color color) override;

@@ -66,6 +66,14 @@ void SVGUseElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_resource_request);
 }
 
+void SVGUseElement::adopted_from(DOM::Document& old_document)
+{
+    Base::adopted_from(old_document);
+
+    if (m_load_event_delayer.has_value())
+        m_load_event_delayer.emplace(document());
+}
+
 void SVGUseElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
@@ -315,9 +323,9 @@ GC::Ptr<SVGElement> SVGUseElement::animated_instance_root() const
     return instance_root();
 }
 
-GC::Ptr<Layout::Node> SVGUseElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> SVGUseElement::create_layout_node(CSS::ComputedProperties const& style)
 {
-    return heap().allocate<Layout::SVGGraphicsBox>(document(), *this, move(style));
+    return make_ref_counted<Layout::SVGGraphicsBox>(document(), *this, style);
 }
 
 }

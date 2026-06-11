@@ -22,6 +22,7 @@
 #include <LibDevTools/DevToolsServer.h>
 #include <LibFileSystem/FileSystem.h>
 #include <LibImageDecoderClient/Client.h>
+#include <LibURL/InternalURLs.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/Loader/UserAgent.h>
 #include <LibWeb/Page/InputEvent.h>
@@ -191,6 +192,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     bool disable_http_memory_cache = false;
     bool disable_http_disk_cache = false;
     bool disable_content_blocker = false;
+    bool enable_sandbox = false;
     Vector<StringView> content_blocker_list_paths;
     Optional<StringView> resource_substitution_map_path;
     bool enable_autoplay = false;
@@ -266,6 +268,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     args_parser.add_option(disable_http_memory_cache, "Disable HTTP memory cache", "disable-http-memory-cache");
     args_parser.add_option(disable_http_disk_cache, "Disable HTTP disk cache", "disable-http-disk-cache");
     args_parser.add_option(disable_content_blocker, "Disable content blocker", "disable-content-blocker");
+    args_parser.add_option(enable_sandbox, "Enable helper process sandboxing", "enable-sandbox");
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
         .help_string = "Path to a content blocker list. May be specified multiple times.",
@@ -389,6 +392,7 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
                 : OptionalNone()),
         .devtools_port = devtools_port,
         .enable_content_blocker = disable_content_blocker ? EnableContentBlocker::No : EnableContentBlocker::Yes,
+        .enable_sandbox = enable_sandbox ? EnableSandbox::Yes : EnableSandbox::No,
         .content_blocker_list_paths = move(content_blocker_list_paths_as_byte_strings),
     };
 
@@ -1241,14 +1245,6 @@ void Application::clear_browsing_data(ClearBrowsingDataOptions const& options)
         on_recently_closed_entries_changed();
 }
 
-void Application::clear_history()
-{
-    dbgln_if(WEBVIEW_HISTORY_DEBUG, "[History] Clearing browsing history");
-
-    m_history_store->clear();
-    on_recently_closed_entries_changed();
-}
-
 void Application::initialize_actions()
 {
     auto debug_request = [this](auto request) {
@@ -1513,6 +1509,11 @@ void Application::initialize_actions()
     m_bookmark_folder_context_menu->add_separator();
     m_bookmark_folder_context_menu->add_action(add_bookmark_action);
     m_bookmark_folder_context_menu->add_action(add_bookmark_folder_action);
+
+    m_history_menu = Menu::create("History"sv);
+    m_history_menu->add_action(Action::create("View History"sv, ActionID::ViewHistory, [this]() {
+        open_url_in_new_tab(URL::about_history(), Web::HTML::ActivateTab::Yes);
+    }));
 
     m_inspect_menu = Menu::create("Inspect"sv);
 

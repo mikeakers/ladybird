@@ -33,6 +33,7 @@
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Dump.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
+#include <LibWeb/Geometry/DOMRect.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/EventLoop/TaskQueue.h>
@@ -141,29 +142,6 @@ WebIDL::ExceptionOr<void> Internals::load_reference_test_metadata()
     metadata.set("fuzzy"sv, fuzzy_configurations);
 
     page.client().page_did_receive_reference_test_metadata(metadata);
-    return {};
-}
-
-// https://web-platform-tests.org/writing-tests/testharness.html#variants
-WebIDL::ExceptionOr<void> Internals::load_test_variants()
-{
-    auto& page = this->page();
-
-    auto* document = page.top_level_browsing_context().active_document();
-    if (!document)
-        return vm().throw_completion<JS::InternalError>("No active document available"sv);
-
-    auto variant_nodes = TRY(document->query_selector_all("meta[name=variant]"sv));
-
-    JsonArray variants;
-    for (size_t i = 0; i < variant_nodes->length(); ++i) {
-        auto const* variant_node = variant_nodes->item(i);
-        auto content = as<DOM::Element>(variant_node)->get_attribute_value(HTML::AttributeNames::content);
-        variants.must_append(content);
-    }
-
-    // Always fire callback so test runner knows variant check is complete.
-    page.client().page_did_receive_test_variant_metadata(variants);
     return {};
 }
 
@@ -416,6 +394,30 @@ String Internals::current_cursor()
 String Internals::selected_text_for_clipboard()
 {
     return page().focused_navigable().selected_text();
+}
+
+void Internals::set_marked_text_from_input_method(Utf16String const& text)
+{
+    page().focused_navigable().set_marked_text_from_input_method(text);
+}
+
+void Internals::commit_text_from_input_method(Utf16String const& text)
+{
+    page().focused_navigable().commit_text_from_input_method(text);
+}
+
+void Internals::unmark_text_from_input_method()
+{
+    page().focused_navigable().unmark_text_from_input_method();
+}
+
+GC::Ptr<Geometry::DOMRect> Internals::current_caret_rect()
+{
+    auto& active_document = window().associated_document();
+    auto rect = active_document.current_caret_rect();
+    if (!rect.has_value())
+        return nullptr;
+    return MUST(Geometry::DOMRect::construct_impl(realm(), static_cast<double>(rect->x()), static_cast<double>(rect->y()), static_cast<double>(rect->width()), static_cast<double>(rect->height())));
 }
 
 WebIDL::ExceptionOr<bool> Internals::dispatch_user_activated_event(DOM::EventTarget& target, DOM::Event& event)

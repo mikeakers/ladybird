@@ -139,8 +139,6 @@ void InlineFormattingContext::dimension_box_on_line(Box const& box, LayoutMode l
     auto const& width_value = box.computed_values().width();
     CSSPixels unconstrained_width = 0;
     if (should_treat_width_as_auto(box, *m_available_space)) {
-        auto result = calculate_shrink_to_fit_widths(box);
-
         if (m_available_space->width.is_definite()) {
             auto available_width = m_available_space->width.to_px_or_zero()
                 - box_state.margin_left
@@ -150,11 +148,17 @@ void InlineFormattingContext::dimension_box_on_line(Box const& box, LayoutMode l
                 - box_state.border_right
                 - box_state.margin_right;
 
-            unconstrained_width = min(max(result.preferred_minimum_width, available_width), result.preferred_width);
+            auto preferred_width = calculate_max_content_width(box);
+            if (preferred_width <= available_width) {
+                unconstrained_width = preferred_width;
+            } else {
+                auto preferred_minimum_width = calculate_min_content_width(box);
+                unconstrained_width = min(max(preferred_minimum_width, available_width), preferred_width);
+            }
         } else if (m_available_space->width.is_min_content()) {
-            unconstrained_width = result.preferred_minimum_width;
+            unconstrained_width = calculate_min_content_width(box);
         } else {
-            unconstrained_width = result.preferred_width;
+            unconstrained_width = calculate_max_content_width(box);
         }
     } else {
         if (width_value.contains_percentage() && !m_available_space->width.is_definite()) {
@@ -252,9 +256,9 @@ void InlineFormattingContext::apply_text_overflow_ellipsis(Vector<LineBox>& line
 
     // NB: When inline children are wrapped in anonymous blocks (e.g. due to floats), we look past the anonymous
     //     wrapper to the actual element that has text-overflow and overflow set.
-    GC::Ref<Box const> block = containing_block();
+    Box const* block = &containing_block();
     if (block->is_anonymous())
-        block = *block->non_anonymous_containing_block();
+        block = block->non_anonymous_containing_block();
 
     // FIXME: Support the <string>, fade, and fade() values, as well as the two-value syntax.
     auto const& block_values = block->computed_values();
@@ -345,8 +349,8 @@ void InlineFormattingContext::generate_line_boxes()
     auto& line_boxes = m_containing_block_used_values.line_boxes;
     line_boxes.clear_with_capacity();
 
-    auto direction = m_context_box->computed_values().direction();
-    auto writing_mode = m_context_box->computed_values().writing_mode();
+    auto direction = m_context_box.computed_values().direction();
+    auto writing_mode = m_context_box.computed_values().writing_mode();
 
     InlineLevelIterator iterator(*this, m_state, containing_block(), m_containing_block_used_values, m_layout_mode);
     LineBuilder line_builder(*this, m_state, m_containing_block_used_values, direction, writing_mode);
@@ -570,10 +574,10 @@ StaticPositionRect InlineFormattingContext::calculate_static_position_rect(Box c
     // We're calculating the position for an absolutely positioned box in an IFC.
     // Walk backwards through previous siblings to find the most recent one with a line box fragment.
     LineBoxFragment const* last_fragment = nullptr;
-    for (auto const* sibling = box.previous_sibling(); sibling && !last_fragment; sibling = sibling->previous_sibling()) {
+    for (auto sibling = box.previous_sibling(); sibling && !last_fragment; sibling = sibling->previous_sibling()) {
         for (auto const& line_box : m_containing_block_used_values.line_boxes) {
             for (auto const& fragment : line_box.fragments()) {
-                if (&fragment.layout_node() == sibling)
+                if (&fragment.layout_node() == sibling.ptr())
                     last_fragment = &fragment;
             }
         }

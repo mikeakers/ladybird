@@ -107,7 +107,6 @@ void HTMLInputElement::initialize(JS::Realm& realm)
 void HTMLInputElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    image_provider_visit_edges(visitor);
     visitor.visit(m_inner_text_element);
     visitor.visit(m_text_node);
     visitor.visit(m_placeholder_element);
@@ -125,6 +124,14 @@ void HTMLInputElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_resource_request);
 }
 
+void HTMLInputElement::adopted_from(DOM::Document& old_document)
+{
+    Base::adopted_from(old_document);
+
+    if (m_load_event_delayer.has_value())
+        m_load_event_delayer.emplace(document());
+}
+
 void HTMLInputElement::set_being_activated(bool activated)
 {
     Base::set_being_activated(activated);
@@ -132,7 +139,7 @@ void HTMLInputElement::set_being_activated(bool activated)
         set_needs_repaint();
 }
 
-GC::Ptr<Layout::Node> HTMLInputElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> HTMLInputElement::create_layout_node(CSS::ComputedProperties const& style)
 {
     if (type_state() == TypeAttributeState::Hidden)
         return nullptr;
@@ -140,15 +147,15 @@ GC::Ptr<Layout::Node> HTMLInputElement::create_layout_node(GC::Ref<CSS::Computed
     // NOTE: Image inputs are `appearance: none` per the default UA style,
     //       but we still need to create an ImageBox for them, or no image will get loaded.
     if (type_state() == TypeAttributeState::ImageButton) {
-        return heap().allocate<Layout::ImageBox>(document(), *this, move(style), *this);
+        return make_ref_counted<Layout::ImageBox>(document(), *this, style, *this);
     }
 
     // https://drafts.csswg.org/css-ui/#appearance-switching
     // This specification introduces the appearance property to provide some control over this behavior.
     // In particular, using appearance: none allows authors to suppress the native appearance of widgets,
     // giving them a primitive appearance where CSS can be used to restyle them.
-    if (style->appearance() == CSS::Appearance::None) {
-        return Element::create_layout_node_for_display_type(document(), style->display(), style, this);
+    if (style.appearance() == CSS::Appearance::None) {
+        return Element::create_layout_node_for_display_type(document(), style.display(), style, this);
     }
 
     switch (type_state()) {
@@ -156,18 +163,18 @@ GC::Ptr<Layout::Node> HTMLInputElement::create_layout_node(GC::Ref<CSS::Computed
     case TypeAttributeState::SubmitButton:
     case TypeAttributeState::Button:
     case TypeAttributeState::ResetButton:
-        return heap().allocate<Layout::BlockContainer>(document(), this, move(style));
+        return make_ref_counted<Layout::BlockContainer>(document(), this, style);
     case TypeAttributeState::Checkbox:
-        return heap().allocate<Layout::CheckBox>(document(), *this, move(style));
+        return make_ref_counted<Layout::CheckBox>(document(), *this, style);
     case TypeAttributeState::RadioButton:
-        return heap().allocate<Layout::RadioButton>(document(), *this, move(style));
+        return make_ref_counted<Layout::RadioButton>(document(), *this, style);
     case TypeAttributeState::Range:
-        return heap().allocate<Layout::RangeInputBox>(document(), *this, move(style));
+        return make_ref_counted<Layout::RangeInputBox>(document(), *this, style);
     case TypeAttributeState::Color:
     case TypeAttributeState::FileUpload:
-        return Element::create_layout_node_for_display_type(document(), style->display(), style, this);
+        return Element::create_layout_node_for_display_type(document(), style.display(), style, this);
     default:
-        return heap().allocate<Layout::TextInputBox>(document(), *this, move(style));
+        return make_ref_counted<Layout::TextInputBox>(document(), *this, style);
     }
 }
 
@@ -567,6 +574,9 @@ void HTMLInputElement::did_edit_text_node(FlyString const& input_type, Optional<
 {
     m_dirty_value = true;
     m_has_uncommitted_changes = true;
+
+    CSS::Invalidation::invalidate_style_after_validity_change(*this);
+
     user_interaction_did_change_input_value(input_type, data);
 }
 
@@ -590,6 +600,10 @@ void HTMLInputElement::did_pick_color(Optional<Color> picked_color, ColorPickerU
             queue_an_element_task(HTML::Task::Source::UserInteraction, [this] {
                 // set its user validity to true
                 m_user_validity = true;
+
+                // AD-HOC: Setting the user validity changes which of the :user-valid and :user-invalid pseudo-classes match.
+                CSS::Invalidation::invalidate_style_after_validity_change(*this);
+
                 // and fire an event named change at the input element, with the bubbles attribute initialized to true.
                 auto change_event = DOM::Event::create(realm(), HTML::EventNames::change);
                 change_event->set_bubbles(true);
@@ -757,6 +771,9 @@ WebIDL::ExceptionOr<void> HTMLInputElement::set_value(Utf16String const& value)
         //    text control, unselecting any selected text and resetting the selection direction to "none".
         if (m_value != old_value) {
             relevant_value_was_changed();
+
+            // AD-HOC: Changing the value may change which validity pseudo-classes match.
+            CSS::Invalidation::invalidate_style_after_validity_change(*this);
 
             if (m_text_node) {
                 m_text_node->set_data(m_value);
@@ -1602,6 +1619,11 @@ void HTMLInputElement::form_associated_element_attribute_changed(FlyString const
             update_shadow_tree();
         }
     }
+
+    // AD-HOC: A change to any of these attributes can change whether the element satisfies its constraints, and
+    //         therefore which validity pseudo-classes match.
+    if (first_is_one_of(name, HTML::AttributeNames::type, HTML::AttributeNames::value, HTML::AttributeNames::required, HTML::AttributeNames::pattern, HTML::AttributeNames::min, HTML::AttributeNames::max, HTML::AttributeNames::step, HTML::AttributeNames::maxlength, HTML::AttributeNames::minlength, HTML::AttributeNames::multiple))
+        CSS::Invalidation::invalidate_style_after_validity_change(*this);
 }
 
 // https://html.spec.whatwg.org/multipage/input.html#input-type-change
@@ -2002,6 +2024,9 @@ void HTMLInputElement::reset_algorithm()
 
     if (m_value != old_value)
         relevant_value_was_changed();
+
+    // AD-HOC: Resetting may change the value and the user validity, affecting which validity pseudo-classes match.
+    CSS::Invalidation::invalidate_style_after_validity_change(*this);
 
     if (m_text_node) {
         m_text_node->set_data(m_value);
@@ -3803,58 +3828,51 @@ bool HTMLInputElement::is_number_mismatching_step(double number) const
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#suffering-from-bad-input
 bool HTMLInputElement::suffering_from_bad_input() const
 {
+    auto relevant_value = this->relevant_value();
+
     switch (type_state()) {
     case TypeAttributeState::Email:
         // https://html.spec.whatwg.org/multipage/input.html#email-state-(type%3Demail)%3Asuffering-from-bad-input
         // While the user interface is representing input that the user agent cannot convert to punycode, the control is suffering from bad input.
-        // FIXME: Implement this.
+        // FIXME: Implement this once email addresses are converted to punycode.
 
         // https://html.spec.whatwg.org/multipage/input.html#email-state-(type%3Demail)%3Asuffering-from-bad-input-2
         // While the user interface describes a situation where an individual value contains a U+002C COMMA (,) or is representing input that the user agent
         // cannot convert to punycode, the control is suffering from bad input.
-        // FIXME: Implement this.
+        // FIXME: Implement this once email addresses are converted to punycode.
         break;
     case TypeAttributeState::Date:
         // https://html.spec.whatwg.org/multipage/input.html#date-state-(type%3Ddate)%3Asuffering-from-bad-input
         // While the user interface describes input that the user agent cannot convert to a valid date string, the control is suffering from bad input.
-        // FIXME: Implement this.
-        break;
+        return !relevant_value.is_empty() && !is_valid_date_string(relevant_value);
     case TypeAttributeState::Month:
         // https://html.spec.whatwg.org/multipage/input.html#month-state-(type%3Dmonth)%3Asuffering-from-bad-input
         // While the user interface describes input that the user agent cannot convert to a valid month string, the control is suffering from bad input.
-        // FIXME: Implement this.
-        break;
+        return !relevant_value.is_empty() && !is_valid_month_string(relevant_value);
     case TypeAttributeState::Week:
         // https://html.spec.whatwg.org/multipage/input.html#week-state-(type%3Dweek)%3Asuffering-from-bad-input
         // While the user interface describes input that the user agent cannot convert to a valid week string, the control is suffering from bad input.
-        // FIXME: Implement this.
-        break;
+        return !relevant_value.is_empty() && !is_valid_week_string(relevant_value);
     case TypeAttributeState::Time:
         // https://html.spec.whatwg.org/multipage/#time-state-(type=time):suffering-from-bad-input
         // While the user interface describes input that the user agent cannot convert to a valid time string, the control is suffering from bad input.
-        // FIXME: Implement this.
-        break;
+        return !relevant_value.is_empty() && !is_valid_time_string(relevant_value);
     case TypeAttributeState::LocalDateAndTime:
         // https://html.spec.whatwg.org/multipage/input.html#local-date-and-time-state-(type%3Ddatetime-local)%3Asuffering-from-bad-input
-        // While the user interface describes input that the user agent cannot convert to a valid normalized local date and time string, the control is suffering from bad
-        // input.
-        // FIXME: Implement this.
-        break;
+        // While the user interface describes input that the user agent cannot convert to a valid normalized local date and time string, the control is suffering from bad input.
+        return !relevant_value.is_empty() && !is_valid_local_date_and_time_string(relevant_value);
     case TypeAttributeState::Number:
         // https://html.spec.whatwg.org/multipage/input.html#number-state-(type%3Dnumber)%3Asuffering-from-bad-input
         // While the user interface describes input that the user agent cannot convert to a valid floating-point number, the control is suffering from bad input.
-        // FIXME: Implement this.
-        break;
+        return !relevant_value.is_empty() && !is_valid_floating_point_number(relevant_value);
     case TypeAttributeState::Range:
         // https://html.spec.whatwg.org/multipage/input.html#range-state-(type%3Drange)%3Asuffering-from-bad-input
         // While the user interface describes input that the user agent cannot convert to a valid floating-point number, the control is suffering from bad input.
-        // FIXME: Implement this.
-        break;
+        return !relevant_value.is_empty() && !is_valid_floating_point_number(relevant_value);
     case TypeAttributeState::Color:
         // https://html.spec.whatwg.org/multipage/input.html#color-state-(type%3Dcolor)%3Asuffering-from-bad-input
         // While the element's value is not the empty string and parsing it returns failure, the control is suffering from bad input.
-        // FIXME: Implement this.
-        break;
+        return !relevant_value.is_empty() && !is_valid_simple_color(relevant_value);
     default:
         break;
     }

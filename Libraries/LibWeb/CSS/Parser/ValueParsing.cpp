@@ -38,6 +38,7 @@
 #include <LibWeb/CSS/StyleValues/ColorMixStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ConicGradientStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ContrastColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CounterDefinitionsStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CounterStyleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CounterStyleValue.h>
@@ -79,6 +80,7 @@
 #include <LibWeb/CSS/StyleValues/URLStyleValue.h>
 #include <LibWeb/CSS/StyleValues/UnicodeRangeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/UnresolvedStyleValue.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/Dump.h>
 #include <LibWeb/Infra/CharacterTypes.h>
@@ -2186,6 +2188,31 @@ RefPtr<StyleValue const> Parser::parse_light_dark_color_value(TokenStream<Compon
     return LightDarkStyleValue::create(light.release_nonnull(), dark.release_nonnull());
 }
 
+// https://drafts.csswg.org/css-color-5/#contrast-color
+RefPtr<StyleValue const> Parser::parse_contrast_color_value(TokenStream<ComponentValue>& outer_tokens)
+{
+    auto transaction = outer_tokens.begin_transaction();
+
+    outer_tokens.discard_whitespace();
+    auto const& function_token = outer_tokens.consume_a_token();
+    if (!function_token.is_function("contrast-color"sv))
+        return {};
+
+    auto inner_tokens = TokenStream { function_token.function().value };
+
+    inner_tokens.discard_whitespace();
+    auto color = parse_color_value(inner_tokens);
+    if (!color)
+        return {};
+
+    inner_tokens.discard_whitespace();
+    if (inner_tokens.has_next_token())
+        return {};
+
+    transaction.commit();
+    return ContrastColorStyleValue::create(color.release_nonnull());
+}
+
 // https://www.w3.org/TR/css-color-4/#color-syntax
 RefPtr<StyleValue const> Parser::parse_color_value(TokenStream<ComponentValue>& tokens)
 {
@@ -2222,6 +2249,8 @@ RefPtr<StyleValue const> Parser::parse_color_value(TokenStream<ComponentValue>& 
         return oklch;
     if (auto light_dark = parse_light_dark_color_value(tokens))
         return light_dark;
+    if (auto contrast_color = parse_contrast_color_value(tokens))
+        return contrast_color;
 
     auto transaction = tokens.begin_transaction();
     tokens.discard_whitespace();
@@ -2694,6 +2723,7 @@ RefPtr<ImageSetStyleValue const> Parser::parse_image_set_function(TokenStream<Co
 
     Vector<ImageSetStyleValue::Option> options;
     options.ensure_capacity(image_set_options_tokens.size());
+    auto style_resource_base_url = m_document ? Optional<::URL::URL> { m_document->base_url() } : Optional<::URL::URL> {};
     for (auto const& option_tokens_list : image_set_options_tokens) {
         if (option_tokens_list.first_matching([](auto const& component_value) { return component_value.contains_attr_tainted_value(); }).has_value())
             return nullptr;
@@ -2704,7 +2734,7 @@ RefPtr<ImageSetStyleValue const> Parser::parse_image_set_function(TokenStream<Co
         RefPtr<AbstractImageStyleValue const> image;
         if (option_tokens.next_token().is(Token::Type::String)) {
             auto url = URL { option_tokens.consume_a_token().token().string().to_string() };
-            image = ImageStyleValue::create(url);
+            image = ImageStyleValue::create(url, style_resource_base_url);
         } else {
             image = parse_image_value(option_tokens, AllowImageSet::No);
         }
@@ -2768,7 +2798,8 @@ RefPtr<AbstractImageStyleValue const> Parser::parse_image_value(TokenStream<Comp
         // FIXME: Remove this special case once mask-image accepts `<image>`.
         if (!url->url().starts_with('#')) {
             tokens.discard_a_mark();
-            return ImageStyleValue::create(url.release_value());
+            auto style_resource_base_url = m_document ? Optional<::URL::URL> { m_document->base_url() } : Optional<::URL::URL> {};
+            return ImageStyleValue::create(url.release_value(), move(style_resource_base_url));
         }
         tokens.restore_a_mark();
         return nullptr;
@@ -5596,7 +5627,7 @@ NonnullRefPtr<StyleValue const> Parser::resolve_unresolved_style_value(DOM::Abst
 
     // 1. Substitute arbitrary substitution functions in prop’s value, given «"property", prop’s name» as the
     //    substitution context. Let result be the returned component value sequence.
-    auto result = substitute_arbitrary_substitution_functions(element, guarded_contexts, unresolved.values(), SubstitutionContext { SubstitutionContext::DependencyType::Property, property.name().to_string() });
+    auto result = substitute_arbitrary_substitution_functions(element, guarded_contexts, unresolved.values(), SubstitutionContext { SubstitutionContext::DependencyType::Property, property.to_string() });
 
     // 2. If result contains the guaranteed-invalid value, prop is invalid at computed-value time; return.
     if (contains_guaranteed_invalid_value(result))

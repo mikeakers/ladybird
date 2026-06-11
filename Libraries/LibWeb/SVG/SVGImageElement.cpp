@@ -41,13 +41,20 @@ void SVGImageElement::initialize(JS::Realm& realm)
 void SVGImageElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    image_provider_visit_edges(visitor);
     SVGURIReferenceMixin::visit_edges(visitor);
     visitor.visit(m_x);
     visitor.visit(m_y);
     visitor.visit(m_width);
     visitor.visit(m_height);
     visitor.visit(m_resource_request);
+}
+
+void SVGImageElement::adopted_from(DOM::Document& old_document)
+{
+    Base::adopted_from(old_document);
+
+    if (m_load_event_delayer.has_value())
+        m_load_event_delayer.emplace(document());
 }
 
 void SVGImageElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
@@ -206,9 +213,9 @@ void SVGImageElement::fetch_the_document(URL::URL const& url)
     }
 }
 
-GC::Ptr<Layout::Node> SVGImageElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> SVGImageElement::create_layout_node(CSS::ComputedProperties const& style)
 {
-    return heap().allocate<Layout::SVGImageBox>(document(), *this, move(style));
+    return make_ref_counted<Layout::SVGImageBox>(document(), *this, style);
 }
 
 bool SVGImageElement::is_image_available() const

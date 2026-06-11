@@ -454,14 +454,6 @@ void WebContentClient::did_receive_reference_test_metadata(u64 page_id, JsonValu
     }
 }
 
-void WebContentClient::did_receive_test_variant_metadata(u64 page_id, JsonValue metadata)
-{
-    if (auto view = view_for_page_id(page_id); view.has_value()) {
-        if (view->on_test_variant_metadata)
-            view->on_test_variant_metadata(metadata);
-    }
-}
-
 void WebContentClient::did_set_browser_zoom(u64 page_id, double factor)
 {
     if (auto view = view_for_page_id(page_id); view.has_value())
@@ -1140,6 +1132,12 @@ void WebContentClient::did_finish_handling_input_event(u64 page_id, Web::EventRe
 {
     if (auto view = view_for_page_id(page_id); view.has_value())
         view->did_finish_handling_input_event({}, event_result);
+}
+
+void WebContentClient::did_update_input_caret_rect(u64 page_id, Optional<Web::DevicePixelRect> rect)
+{
+    if (auto view = view_for_page_id(page_id); view.has_value())
+        view->set_input_caret_rect({}, rect);
 }
 
 void WebContentClient::did_change_theme_color(u64 page_id, Gfx::Color color)

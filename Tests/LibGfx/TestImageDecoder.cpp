@@ -104,6 +104,20 @@ TEST_CASE(test_bmp_os2_3bit)
     EXPECT_EQ(frame.image->get_pixel(152, 100), Gfx::Color::NamedColor::White);
 }
 
+TEST_CASE(test_bmp_rle24)
+{
+    // 2x1 OS/2 2.x BI_RLE24 image: one run of two BGR (0x33, 0x22, 0x11) pixels.
+    // Regression test for a misaligned u32 store in the RLE24 decoder (issue #9958).
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("bmp/rle24.bmp"sv)));
+    EXPECT(Gfx::BMPImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::BMPImageDecoderPlugin::create(file->bytes()));
+
+    auto frame = TRY_OR_FAIL(expect_single_frame_of_size(*plugin_decoder, { 2, 1 }));
+    EXPECT_EQ(frame.image->format(), Gfx::BitmapFormat::RGBx8888);
+    EXPECT_EQ(frame.image->begin()[0] & 0x00ffffffU, 0x00332211U);
+    EXPECT_EQ(frame.image->begin()[1] & 0x00ffffffU, 0x00332211U);
+}
+
 TEST_CASE(test_ico_malformed_frame)
 {
     Array test_inputs = {
@@ -153,6 +167,33 @@ TEST_CASE(test_gif)
 
     auto frame = TRY_OR_FAIL(plugin_decoder->frame(1));
     EXPECT(frame.duration == 400);
+}
+
+TEST_CASE(test_gif_loop_count_from_netscape_extension)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("gif/loop-count-2.gif"sv)));
+    EXPECT(Gfx::GIFImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::GIFImageDecoderPlugin::create(file->bytes()));
+
+    EXPECT_EQ(plugin_decoder->frame_count(), 2u);
+    EXPECT(plugin_decoder->is_animated());
+
+    EXPECT_EQ(plugin_decoder->loop_count(), 3u);
+}
+
+TEST_CASE(test_gif_corrupt_second_frame)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("gif/corrupt-second-frame.gif"sv)));
+    EXPECT(Gfx::GIFImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::GIFImageDecoderPlugin::create(file->bytes()));
+
+    EXPECT_EQ(plugin_decoder->frame_count(), 2u);
+
+    auto first_frame = TRY_OR_FAIL(plugin_decoder->frame(0));
+    EXPECT_EQ(first_frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::Red);
+
+    EXPECT(plugin_decoder->frame(1).is_error());
+    EXPECT(!plugin_decoder->frame(0).is_error());
 }
 
 TEST_CASE(test_corrupted_gif)

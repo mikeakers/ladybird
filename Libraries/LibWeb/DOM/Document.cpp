@@ -70,6 +70,7 @@
 #include <LibWeb/CSS/StyleSheetList.h>
 #include <LibWeb/CSS/StyleValues/ColorSchemeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GuaranteedInvalidStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RandomValueSharingStyleValue.h>
 #include <LibWeb/CSS/SystemColor.h>
 #include <LibWeb/CSS/TransitionEvent.h>
@@ -671,7 +672,6 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_pending_css_import_rules);
     visitor.visit(m_page);
     visitor.visit(m_window);
-    visitor.visit(m_layout_root);
     visitor.visit(m_style_sheets);
     visitor.visit(m_hovered_node);
     visitor.visit(m_inspected_node);
@@ -724,10 +724,11 @@ void Document::visit_edges(Cell::Visitor& visitor)
     for (auto& resize_observer : m_resize_observers)
         visitor.visit(resize_observer);
 
-    visitor.visit(m_svg_roots_needing_relayout);
     visitor.visit(m_query_containers_needing_container_query_evaluation_after_layout);
 
     visitor.visit(m_shared_resource_requests);
+    for (auto& resource : m_css_image_resources)
+        resource.value->visit_edges(visitor);
 
     visitor.visit(m_associated_animation_timelines);
     visitor.visit(m_list_of_available_images);
@@ -1350,6 +1351,7 @@ void Document::tear_down_layout_tree()
 {
     if (m_layout_root)
         m_layout_root->prepare_subtree_for_detach_from_layout_tree();
+    m_hit_test_display_list = nullptr;
     m_layout_root = nullptr;
     m_paintable = nullptr;
     m_needs_full_layout_tree_update = true;
@@ -1631,7 +1633,7 @@ void Document::invalidate_layout_tree(InvalidateLayoutTreeReason reason)
 
 void Document::mark_svg_root_as_needing_relayout(Layout::SVGSVGBox& svg_root)
 {
-    m_svg_roots_needing_relayout.set(svg_root);
+    m_svg_roots_needing_relayout.set(svg_root.make_weak_ptr<Layout::SVGSVGBox>());
 }
 
 void Document::set_needs_container_query_evaluation_after_layout(Element const& query_container)
@@ -1796,8 +1798,10 @@ void Document::update_layout(UpdateLayoutReason reason)
 
         // Partial SVG relayout
         if (!needs_layout_tree_rebuild && !svg_roots_to_relayout.is_empty() && !m_layout_root->needs_layout_update()) {
-            for (auto const& svg_root : svg_roots_to_relayout)
-                relayout_svg_root(*svg_root);
+            for (auto const& svg_root : svg_roots_to_relayout) {
+                if (svg_root)
+                    relayout_svg_root(*svg_root);
+            }
 
             invalidate_stacking_context_tree();
             set_needs_to_record_display_list();
@@ -2290,7 +2294,7 @@ static CSS::RequiredInvalidationAfterStyleChange recompute_style_for_targeted_st
     return {};
 }
 
-GC::Ptr<CSS::ComputedProperties const> Document::update_style_for_element(AbstractElement const& abstract_element, StyleUpdateMode mode)
+CSS::ComputedProperties const* Document::update_style_for_element(AbstractElement const& abstract_element, StyleUpdateMode mode)
 {
     // Refresh computed properties for an abstract element without requiring every unrelated dirty element in the
     // document to be resolved. This walks the flat-tree inheritance chain and re-cascades from the rootmost stale
@@ -2349,7 +2353,7 @@ GC::Ptr<CSS::ComputedProperties const> Document::update_style_for_element(Abstra
             ancestor_needs_descendant_style_recompute = true;
         }
 
-        if (auto const* properties = ancestor->computed_properties().ptr(); properties && properties->display().is_none()) {
+        if (auto const properties = ancestor->computed_properties(); properties && properties->display().is_none()) {
             topmost_display_none_index = i - 1;
             if (mode == StyleUpdateMode::StopAtDisplayNone && !topmost_element_requiring_style.has_value())
                 return nullptr;
@@ -2758,7 +2762,7 @@ void Document::clear_grid_highlighted_node(GC::Ptr<Node> node)
         node->set_needs_repaint();
 }
 
-GC::Ptr<Layout::Node> Document::highlighted_layout_node()
+Layout::Node* Document::highlighted_layout_node()
 {
     if (!m_highlighted_node)
         return nullptr;
@@ -5740,7 +5744,10 @@ void Document::unload_a_document_and_its_descendants(GC::Ptr<Document> new_docum
                 auto increment_unloaded = GC::create_function(heap, [unload_state] { unload_state->did_process_child(); });
 
                 // 2. Unload a document and its descendants given childNavigable's active document, null, and incrementUnloaded.
-                child_navigable->active_document()->unload_a_document_and_its_descendants({}, increment_unloaded);
+                if (auto active_document = child_navigable->active_document())
+                    active_document->unload_a_document_and_its_descendants({}, increment_unloaded);
+                else
+                    increment_unloaded->function()();
             }));
     }
 
@@ -6706,10 +6713,73 @@ HashMap<URL::URL, GC::Ptr<HTML::SharedResourceRequest>>& Document::shared_resour
     return m_shared_resource_requests;
 }
 
+HashMap<URL::URL, GC::Ptr<HTML::SharedResourceRequest>> const& Document::shared_resource_requests() const
+{
+    return m_shared_resource_requests;
+}
+
+CSS::ImageStyleValueResource* Document::css_image_resource(URL::URL const& url)
+{
+    auto it = m_css_image_resources.find(url);
+    if (it == m_css_image_resources.end())
+        return nullptr;
+    return it->value.ptr();
+}
+
+CSS::ImageStyleValueResource const* Document::css_image_resource(URL::URL const& url) const
+{
+    auto it = m_css_image_resources.find(url);
+    if (it == m_css_image_resources.end())
+        return nullptr;
+    return it->value.ptr();
+}
+
+CSS::ImageStyleValueResource& Document::ensure_css_image_resource(URL::URL const& url)
+{
+    if (auto* resource = css_image_resource(url))
+        return *resource;
+
+    auto resource = make<CSS::ImageStyleValueResource>(url);
+    auto& resource_ref = *resource;
+    m_css_image_resources.set(url, move(resource));
+    return resource_ref;
+}
+
+void Document::remove_css_image_resource_if_unused(URL::URL const& url)
+{
+    auto it = m_css_image_resources.find(url);
+    if (it == m_css_image_resources.end())
+        return;
+    if (!it->value->can_be_removed())
+        return;
+    m_css_image_resources.remove(it);
+}
+
+void Document::animate_css_image_resource(URL::URL const& url)
+{
+    if (auto* resource = css_image_resource(url))
+        resource->animate(*this);
+}
+
+u64 Document::active_css_image_animation_timer_count() const
+{
+    u64 count = 0;
+    for (auto const& it : m_css_image_resources) {
+        if (it.value->has_active_animation_timer())
+            ++count;
+    }
+    return count;
+}
+
 void Document::prune_image_resource_caches()
 {
     static constexpr size_t decoded_image_resource_cache_limit = 8 * MiB;
     static constexpr size_t decoded_image_resource_cache_count_limit = 96;
+
+    auto is_used_by_css_image_resource = [&](URL::URL const& url, HTML::SharedResourceRequest const& request) {
+        auto* css_image_resource = this->css_image_resource(url);
+        return css_image_resource && css_image_resource->image_data() == request.image_data();
+    };
 
     struct CacheSize {
         size_t decoded_image_size { 0 };
@@ -6723,6 +6793,8 @@ void Document::prune_image_resource_caches()
         for (auto const& it : m_shared_resource_requests) {
             auto const& request = *it.value;
             if (!request.can_be_pruned_from_memory_cache())
+                continue;
+            if (is_used_by_css_image_resource(it.key, request))
                 continue;
             ++count;
             if (auto image_data = request.image_data())
@@ -6741,6 +6813,8 @@ void Document::prune_image_resource_caches()
         for (auto const& it : m_shared_resource_requests) {
             auto const& request = *it.value;
             if (!request.can_be_pruned_from_memory_cache())
+                continue;
+            if (is_used_by_css_image_resource(it.key, request))
                 continue;
             if (request.cache_touch_serial() >= least_recently_used_serial)
                 continue;
@@ -7858,16 +7932,29 @@ Vector<GC::Root<Range>> Document::find_matching_text(String const& query, CaseSe
                 match_start_position = &text_block.positions[i + 1];
 
             auto start_position = match_index.value() - match_start_position->start_offset + match_start_position->dom_offset_within_node;
-            auto& start_dom_node = match_start_position->dom_node;
+            auto start_dom_node = match_start_position->dom_node.ptr();
+            VERIFY(start_dom_node);
 
             auto* match_end_position = match_start_position;
             for (; i < text_block.positions.size() - 1 && (match_index.value() + utf16_query.length_in_code_units() > text_block.positions[i + 1].start_offset); ++i)
                 match_end_position = &text_block.positions[i + 1];
 
-            auto& end_dom_node = match_end_position->dom_node;
+            auto end_dom_node = match_end_position->dom_node.ptr();
+            VERIFY(end_dom_node);
             auto end_position = match_index.value() + utf16_query.length_in_code_units() - match_end_position->start_offset + match_end_position->dom_offset_within_node;
 
-            matches.append(Range::create(start_dom_node, start_position, end_dom_node, end_position));
+            if (&start_dom_node->root() != &end_dom_node->root()
+                || !start_dom_node->is_connected()
+                || !end_dom_node->is_connected()
+                || start_position > start_dom_node->length()
+                || end_position > end_dom_node->length()) {
+                offset = match_index.value() + utf16_query.length_in_code_units() + 1;
+                if (offset >= text_view.length_in_code_units())
+                    break;
+                continue;
+            }
+
+            matches.append(Range::create(*start_dom_node, start_position, *end_dom_node, end_position));
             match_start_position = match_end_position;
             offset = match_index.value() + utf16_query.length_in_code_units() + 1;
             if (offset >= text_view.length_in_code_units())
@@ -8304,6 +8391,63 @@ GC::Ptr<DOM::Position> Document::cursor_position() const
         return m_selection->cursor_position();
 
     return nullptr;
+}
+
+Optional<CSSPixelRect> Document::current_caret_rect()
+{
+    // Returns the bounds of the current text caret in viewport-relative CSS pixels. Used to position platform overlays
+    // such as the IME candidate window. Returns nothing when no editable element is focused or when layout isn't ready.
+    auto position = cursor_position();
+    if (!position)
+        return {};
+    auto& dom_node = *position->node();
+
+    update_layout(UpdateLayoutReason::InputCaretRect);
+
+    auto* layout_node = dom_node.layout_node();
+    if (!layout_node)
+        return {};
+
+    // The caret rects computed here are document-relative (absolute). Platform IME overlays are positioned relative to
+    // the viewport — so translate by scroll offset and map through any containing navigables to the top-level viewport.
+    auto to_viewport_rect = [this](CSSPixelRect rect) -> CSSPixelRect {
+        auto navigable = this->navigable();
+        if (!navigable)
+            return rect;
+        auto scroll = navigable->viewport_scroll_offset();
+        CSSPixelRect viewport_rect { rect.x() - scroll.x(), rect.y() - scroll.y(), rect.width(), rect.height() };
+        return navigable->to_top_level_rect(viewport_rect);
+    };
+
+    // Walk up to the nearest PaintableWithLines, which is where text fragments live.
+    Painting::PaintableWithLines const* paintable_with_lines = nullptr;
+    for (auto paintable = layout_node->first_paintable(); paintable; paintable = paintable->parent()) {
+        if (auto const* with_lines = as_if<Painting::PaintableWithLines>(*paintable)) {
+            paintable_with_lines = with_lines;
+            break;
+        }
+    }
+
+    if (paintable_with_lines) {
+        for (auto const& fragment : paintable_with_lines->fragments()) {
+            if (fragment.layout_node().dom_node() != &dom_node)
+                continue;
+            auto const offset = position->offset();
+            if (offset < fragment.dom_start_offset_in_node() || offset > fragment.dom_end_offset_in_node())
+                continue;
+            return to_viewport_rect(fragment.range_rect(Painting::Paintable::SelectionState::StartAndEnd, offset, offset));
+        }
+    }
+
+    // Empty editable elements have no fragments; fall back to the padding-box corner.
+    if (auto* node_with_style = as_if<Layout::NodeWithStyleAndBoxModelMetrics>(*layout_node)) {
+        auto paintable = node_with_style->first_paintable();
+        if (auto const* box = as_if<Painting::PaintableBox>(paintable.ptr())) {
+            auto content_box = box->absolute_padding_box_rect();
+            return to_viewport_rect(CSSPixelRect { content_box.x(), content_box.y(), 1, node_with_style->computed_values().line_height() });
+        }
+    }
+    return {};
 }
 
 void Document::reset_cursor_blink_cycle()
@@ -9063,7 +9207,7 @@ Optional<Vector<CSS::Parser::ComponentValue>> Document::environment_variable_val
     VERIFY_NOT_REACHED();
 }
 
-HashMap<FlyString, CSS::CustomPropertyRegistration>& Document::registered_property_set()
+HashMap<Utf16FlyString, CSS::CustomPropertyRegistration>& Document::registered_property_set()
 {
     return m_registered_property_set;
 }
@@ -9086,7 +9230,7 @@ GC::Ref<DOM::Node> Document::create_ns_resolver(GC::Ref<DOM::Node> node_resolver
 }
 
 // https://drafts.css-houdini.org/css-properties-values-api/#determining-registration
-Optional<CSS::CustomPropertyRegistration const&> Document::get_registered_custom_property(FlyString const& name) const
+Optional<CSS::CustomPropertyRegistration const&> Document::get_registered_custom_property(Utf16FlyString const& name) const
 {
     // If the Document’s [[registeredPropertySet]] slot contains a record with the custom property’s name, the
     // registration is that record.
@@ -9102,7 +9246,7 @@ Optional<CSS::CustomPropertyRegistration const&> Document::get_registered_custom
     return {};
 }
 
-NonnullRefPtr<CSS::StyleValue const> Document::custom_property_initial_value(FlyString const& name) const
+NonnullRefPtr<CSS::StyleValue const> Document::custom_property_initial_value(Utf16FlyString const& name) const
 {
     auto maybe_custom_property = get_registered_custom_property(name);
     if (maybe_custom_property.has_value()) {
@@ -9128,7 +9272,7 @@ void Document::did_change_custom_property_registrations()
 
 void Document::build_registered_properties_cache()
 {
-    HashMap<FlyString, CSS::CustomPropertyRegistration> cached_registered_properties_from_css_property_rules;
+    HashMap<Utf16FlyString, CSS::CustomPropertyRegistration> cached_registered_properties_from_css_property_rules;
     for_each_active_css_style_sheet([&](CSS::CSSStyleSheet const& style_sheet) {
         style_sheet.for_each_effective_rule(TraversalOrder::Preorder, [&](CSS::CSSRule const& rule) {
             if (auto* property_rule = as_if<CSS::CSSPropertyRule>(rule))

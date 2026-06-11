@@ -117,6 +117,13 @@ jobs:
           ccache_path: ${{ steps.setup.outputs.ccache_path }}
           vcpkg_cache_path: ${{ steps.setup.outputs.vcpkg_cache_path }}
 
+      - name: Cache the WebAssembly spec test suite
+        if: ${{ inputs.os_name != 'Windows' }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/caches/WasmSpecTests
+          key: wasm-spec-test-suite | ${{ hashFiles('Meta/CMake/wasm_spec_tests.cmake') }}
+
       - name: Set dynamic environment variables
         if: ${{ inputs.os_name != 'Windows' }}
         run: |
@@ -154,18 +161,11 @@ jobs:
           VCPKG_CACHE_SAS: ${{ github.ref == 'refs/heads/master' && secrets.VCPKG_CACHE_SAS || '' }}
           VCPKG_CACHE_MODE: ${{ github.ref == 'refs/heads/master' && 'write' || '' }}
         run: |
-          cmake --preset=Host_Tools -B "${GITHUB_WORKSPACE}/Build/host-tools-build" \
-            ${{ steps.build-parameters.outputs.cmake_options }} \
-            -DPython3_EXECUTABLE=${{ env.pythonLocation }}/bin/python
-
-          ninja -C "${GITHUB_WORKSPACE}/Build/host-tools-build" install
-
           cmake --preset ${{ inputs.build_preset }} -B Build \
             ${{ steps.build-parameters.outputs.cmake_options }} \
             -DPython3_EXECUTABLE=${{ env.pythonLocation }}/bin/python \
             -DCMAKE_C_COMPILER=${{ steps.build-parameters.outputs.host_cc }} \
-            -DCMAKE_CXX_COMPILER=${{ steps.build-parameters.outputs.host_cxx }} \
-            -DLagomTools_DIR=${GITHUB_WORKSPACE}/Build/host-tools/share/LagomTools
+            -DCMAKE_CXX_COMPILER=${{ steps.build-parameters.outputs.host_cxx }}
 
       # === BUILD ===
 

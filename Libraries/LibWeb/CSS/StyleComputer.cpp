@@ -260,6 +260,10 @@ Vector<HasInvalidationMetadata> const* StyleComputer::has_invalidation_metadata_
 
 static bool scope_selector_matches(Selector const& selector, DOM::Element const& element, DOM::Element const& subject, CSSStyleSheet const& scope_style_sheet, GC::Ptr<DOM::Element const> shadow_host, GC::Ptr<DOM::ShadowRoot const> rule_root, GC::Ptr<DOM::ParentNode const> scope)
 {
+    // A scope boundary match can activate or deactivate rules for descendants of the scope root.
+    if (&element == &subject && selector.contains_pseudo_class(PseudoClass::Has))
+        const_cast<DOM::Element&>(element).set_affected_by_has_pseudo_class_in_non_subject_position(true);
+
     SelectorEngine::MatchContext context {
         .style_sheet_for_rule = scope_style_sheet,
         .subject = subject,
@@ -710,7 +714,7 @@ void StyleComputer::cascade_declarations(
     }
 }
 
-static void cascade_custom_properties(DOM::AbstractElement abstract_element, Vector<StyleComputer::ScopedMatchingRule> const& matching_rules, OrderedHashMap<FlyString, StyleProperty>& custom_properties, Important important, bool include_inline_style)
+static void cascade_custom_properties(DOM::AbstractElement abstract_element, Vector<StyleComputer::ScopedMatchingRule> const& matching_rules, OrderedHashMap<Utf16FlyString, StyleProperty>& custom_properties, Important important, bool include_inline_style)
 {
     size_t needed_capacity = 0;
     for (auto const& matching_rule : matching_rules)
@@ -1497,7 +1501,7 @@ StyleComputer::MatchingRuleSet StyleComputer::build_matching_rule_set(DOM::Abstr
     return matching_rule_set;
 }
 
-static bool custom_property_inherits(DOM::Document const& document, FlyString const& name)
+static bool custom_property_inherits(DOM::Document const& document, Utf16FlyString const& name)
 {
     // A custom property inherits unless it has been registered with an explicit `inherits: false`.
     auto registration = document.get_registered_custom_property(name);
@@ -1569,7 +1573,7 @@ static JsonArray serialize_devtools_style_declarations(DOM::Document const& docu
 
     for (auto const& custom_property : declaration.custom_properties())
         serialize_property(
-            custom_property.key.to_string(),
+            custom_property.key.to_utf16_string().to_utf8_but_should_be_ported_to_utf16(),
             custom_property.value,
             IsCustomProperty::Yes,
             custom_property_inherits(document, custom_property.key) ? Inherits::Yes : Inherits::No);
@@ -1583,8 +1587,8 @@ static JsonArray serialize_devtools_style_declarations(DOM::Document const& docu
 
     for (auto const& declaration : declarations) {
         bool inherits = declaration.is_custom_property
-            ? custom_property_inherits(document, declaration.name)
-            : PropertyNameAndID::from_name(declaration.name)
+            ? custom_property_inherits(document, Utf16FlyString::from_utf8(declaration.name))
+            : PropertyNameAndID::from_name(Utf16FlyString::from_utf8(declaration.name))
                   .map([](auto const& property) { return !property.is_custom_property() && is_inherited_property(property.id()); })
                   .value_or(false);
 
@@ -1929,9 +1933,9 @@ JsonArray StyleComputer::collect_devtools_applied_style_rules(DOM::AbstractEleme
 
 // https://www.w3.org/TR/css-cascade/#cascading
 // https://drafts.csswg.org/css-cascade-5/#layering
-GC::Ref<CascadedProperties> StyleComputer::compute_cascaded_values(DOM::AbstractElement abstract_element, bool did_match_any_pseudo_element_rules, ComputeStyleMode mode, MatchingRuleSet const& matching_rule_set) const
+NonnullRefPtr<CascadedProperties> StyleComputer::compute_cascaded_values(DOM::AbstractElement abstract_element, bool did_match_any_pseudo_element_rules, ComputeStyleMode mode, MatchingRuleSet const& matching_rule_set) const
 {
-    auto cascaded_properties = m_document->heap().allocate<CascadedProperties>();
+    auto cascaded_properties = CascadedProperties::create();
     if (mode == ComputeStyleMode::CreatePseudoElementStyleIfNeeded) {
         if (!did_match_any_pseudo_element_rules)
             return cascaded_properties;
@@ -2457,9 +2461,9 @@ void StyleComputer::transform_box_type_if_needed(ComputedProperties& style, DOM:
         style.set_property(PropertyID::Display, DisplayStyleValue::create(new_display));
 }
 
-GC::Ref<ComputedProperties> StyleComputer::create_document_style() const
+NonnullRefPtr<ComputedProperties> StyleComputer::create_document_style() const
 {
-    auto style = document().heap().allocate<CSS::ComputedProperties>();
+    auto style = CSS::ComputedProperties::create();
     for (auto i = to_underlying(CSS::first_longhand_property_id); i <= to_underlying(CSS::last_longhand_property_id); ++i) {
         auto property_id = static_cast<PropertyID>(i);
         style->set_property(property_id, property_initial_value(property_id));
@@ -2472,13 +2476,13 @@ GC::Ref<ComputedProperties> StyleComputer::create_document_style() const
     return style;
 }
 
-GC::Ref<ComputedProperties> StyleComputer::compute_style(DOM::AbstractElement abstract_element, Optional<bool&> did_change_custom_properties) const
+NonnullRefPtr<ComputedProperties> StyleComputer::compute_style(DOM::AbstractElement abstract_element, Optional<bool&> did_change_custom_properties) const
 {
     auto& style_scope = abstract_element.style_scope();
     return *compute_style_impl(abstract_element, ComputeStyleMode::Normal, did_change_custom_properties, style_scope);
 }
 
-GC::Ref<ComputedProperties> StyleComputer::compute_style_with_seeded_ancestors(DOM::AbstractElement abstract_element)
+NonnullRefPtr<ComputedProperties> StyleComputer::compute_style_with_seeded_ancestors(DOM::AbstractElement abstract_element)
 {
     auto const first_ancestor = [&] -> GC::Ptr<DOM::Element const> {
         if (abstract_element.pseudo_element().has_value())
@@ -2498,13 +2502,13 @@ GC::Ref<ComputedProperties> StyleComputer::compute_style_with_seeded_ancestors(D
     return compute_style(abstract_element);
 }
 
-GC::Ptr<ComputedProperties> StyleComputer::compute_pseudo_element_style_if_needed(DOM::AbstractElement abstract_element, Optional<bool&> did_change_custom_properties) const
+RefPtr<ComputedProperties> StyleComputer::compute_pseudo_element_style_if_needed(DOM::AbstractElement abstract_element, Optional<bool&> did_change_custom_properties) const
 {
     auto& style_scope = abstract_element.style_scope();
     return compute_style_impl(abstract_element, ComputeStyleMode::CreatePseudoElementStyleIfNeeded, did_change_custom_properties, style_scope);
 }
 
-GC::Ptr<ComputedProperties> StyleComputer::compute_style_impl(DOM::AbstractElement abstract_element, ComputeStyleMode mode, Optional<bool&> did_change_custom_properties, StyleScope const& style_scope) const
+RefPtr<ComputedProperties> StyleComputer::compute_style_impl(DOM::AbstractElement abstract_element, ComputeStyleMode mode, Optional<bool&> did_change_custom_properties, StyleScope const& style_scope) const
 {
     style_scope.build_rule_cache_if_needed();
 
@@ -2557,7 +2561,7 @@ GC::Ptr<ComputedProperties> StyleComputer::compute_style_impl(DOM::AbstractEleme
 
     // Resolve all the CSS custom properties ("variables") for this element:
     if (!abstract_element.pseudo_element().has_value() || pseudo_element_supports_property(*abstract_element.pseudo_element(), PropertyID::Custom)) {
-        OrderedHashMap<FlyString, StyleProperty> cascaded_all;
+        OrderedHashMap<Utf16FlyString, StyleProperty> cascaded_all;
 
         auto element_context_shadow_root = as_if<DOM::ShadowRoot>(abstract_element.element().root());
         auto cascade_inline_style = [&](Important important) {
@@ -2586,7 +2590,7 @@ GC::Ptr<ComputedProperties> StyleComputer::compute_style_impl(DOM::AbstractEleme
         // Build own_values with only properties that differ from the parent.
         // We build a fresh map instead of removing from cascaded_all,
         // because removing entries doesn't shrink the bucket array.
-        OrderedHashMap<FlyString, StyleProperty> cascaded_own;
+        OrderedHashMap<Utf16FlyString, StyleProperty> cascaded_own;
         for (auto& [name, property] : cascaded_all) {
             if (parent_data) {
                 auto const* parent_property = parent_data->get(name);
@@ -2636,7 +2640,7 @@ GC::Ptr<ComputedProperties> StyleComputer::compute_style_impl(DOM::AbstractEleme
     if (did_change_custom_properties.has_value()) {
         auto new_custom_property_data = abstract_element.custom_property_data();
         if (old_custom_property_data.ptr() != new_custom_property_data.ptr()) {
-            static NeverDestroyed<OrderedHashMap<FlyString, StyleProperty>> empty_own_values;
+            static NeverDestroyed<OrderedHashMap<Utf16FlyString, StyleProperty>> empty_own_values;
             auto const& old_own = old_custom_property_data ? old_custom_property_data->own_values() : *empty_own_values;
             auto const& new_own = new_custom_property_data ? new_custom_property_data->own_values() : *empty_own_values;
             if (old_own != new_own)
@@ -2760,11 +2764,11 @@ RefPtr<StyleValue const> StyleComputer::recascade_font_size_if_needed(DOM::Abstr
     return CSS::LengthStyleValue::create(CSS::Length::make_px(current_size_in_px));
 }
 
-GC::Ref<ComputedProperties> StyleComputer::compute_properties(DOM::AbstractElement abstract_element, CascadedProperties& cascaded_properties) const
+NonnullRefPtr<ComputedProperties> StyleComputer::compute_properties(DOM::AbstractElement abstract_element, CascadedProperties& cascaded_properties) const
 {
     VERIFY(computation_context_cache_is_empty());
 
-    auto computed_style = document().heap().allocate<CSS::ComputedProperties>();
+    auto computed_style = CSS::ComputedProperties::create();
 
     bool recascaded_font_size_depends_on_viewport_metrics = false;
     auto new_font_size = recascade_font_size_if_needed(abstract_element, cascaded_properties, recascaded_font_size_depends_on_viewport_metrics);
@@ -2998,7 +3002,7 @@ static Optional<SimplifiedSelectorForBucketing> is_roundabout_selector_bucketabl
     return {};
 }
 
-NonnullRefPtr<StyleValue const> StyleComputer::compute_value_of_custom_property(DOM::AbstractElement abstract_element, FlyString const& name, Optional<Parser::GuardedSubstitutionContexts&> guarded_contexts)
+NonnullRefPtr<StyleValue const> StyleComputer::compute_value_of_custom_property(DOM::AbstractElement abstract_element, Utf16FlyString const& name, Optional<Parser::GuardedSubstitutionContexts&> guarded_contexts)
 {
     // https://drafts.csswg.org/css-variables/#propdef-
     // The computed value of a custom property is its specified value with any arbitrary-substitution functions replaced.
@@ -3060,7 +3064,7 @@ void StyleComputer::compute_custom_properties(ComputedProperties&, DOM::Abstract
     if (inherit_from.has_value())
         parent_data = inheritable_custom_property_data(*inherit_from);
 
-    OrderedHashMap<FlyString, StyleProperty> resolved_own;
+    OrderedHashMap<Utf16FlyString, StyleProperty> resolved_own;
     for (auto const& [name, style_property] : data->own_values()) {
         auto resolved_value = compute_value_of_custom_property(abstract_element, name);
         if (parent_data) {

@@ -132,7 +132,7 @@ public:
 
     struct PropertiesAndCustomProperties {
         Vector<StyleProperty> properties;
-        OrderedHashMap<FlyString, StyleProperty> custom_properties;
+        OrderedHashMap<Utf16FlyString, StyleProperty> custom_properties;
     };
     PropertiesAndCustomProperties parse_as_property_declaration_block();
     Vector<DevToolsStyleDeclaration> parse_as_devtools_property_declaration_block();
@@ -430,6 +430,7 @@ private:
     RefPtr<StyleValue const> parse_color_function(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_color_mix_function(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_light_dark_color_value(TokenStream<ComponentValue>&);
+    RefPtr<StyleValue const> parse_contrast_color_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_color_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_color_scheme_value(TokenStream<ComponentValue>&);
     RefPtr<StyleValue const> parse_corner_shape_value(TokenStream<ComponentValue>&);

@@ -202,15 +202,15 @@ public:
     Optional<CSS::PseudoElement> associated_shadow_host_pseudo_element() const { return m_associated_shadow_host_pseudo_element; }
     void set_associated_shadow_host_pseudo_element(CSS::PseudoElement pseudo_element);
 
-    GC::Ptr<Layout::NodeWithStyle> layout_node();
-    GC::Ptr<Layout::NodeWithStyle const> layout_node() const;
+    Layout::NodeWithStyle* layout_node();
+    Layout::NodeWithStyle const* layout_node() const;
 
-    GC::Ptr<Layout::NodeWithStyle> unsafe_layout_node();
-    GC::Ptr<Layout::NodeWithStyle const> unsafe_layout_node() const;
+    Layout::NodeWithStyle* unsafe_layout_node();
+    Layout::NodeWithStyle const* unsafe_layout_node() const;
 
-    GC::Ptr<CSS::ComputedProperties> computed_properties(Optional<CSS::PseudoElement> = {});
-    GC::Ptr<CSS::ComputedProperties const> computed_properties(Optional<CSS::PseudoElement> = {}) const;
-    void set_computed_properties(Optional<CSS::PseudoElement>, GC::Ptr<CSS::ComputedProperties>);
+    RefPtr<CSS::ComputedProperties> computed_properties(Optional<CSS::PseudoElement> = {});
+    RefPtr<CSS::ComputedProperties const> computed_properties(Optional<CSS::PseudoElement> = {}) const;
+    void set_computed_properties(Optional<CSS::PseudoElement>, RefPtr<CSS::ComputedProperties>);
 
     Optional<SyntheticPseudoElement&> get_synthetic_pseudo_element(CSS::PseudoElement) const;
     Optional<PseudoElement&> get_pseudo_element(CSS::PseudoElement) const;
@@ -361,7 +361,7 @@ public:
     [[nodiscard]] Vector<CSSPixelRect> client_rects_assuming_layout_clean() const;
     [[nodiscard]] CSSPixelRect bounding_client_rect_assuming_layout_clean() const;
 
-    virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>);
+    virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&);
     virtual void adjust_computed_style(CSS::ComputedProperties&) { }
 
     virtual void did_receive_focus() { }
@@ -369,7 +369,7 @@ public:
     bool should_indicate_focus() const;
     virtual bool is_focusable() const override;
 
-    static GC::Ptr<Layout::NodeWithStyle> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, GC::Ref<CSS::ComputedProperties>, Element*);
+    static RefPtr<Layout::NodeWithStyle> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, CSS::ComputedProperties const&, Element*);
 
     void clear_removed_attributes_for_style_invalidation() { m_removed_attributes_for_style_invalidation.clear(); }
     bool has_removed_attribute_for_style_invalidation(FlyString const& attribute_name) const
@@ -382,10 +382,10 @@ public:
             m_removed_attributes_for_style_invalidation.append(attribute_name);
     }
 
-    void set_synthetic_pseudo_element_node(Badge<Layout::TreeBuilder>, CSS::PseudoElement, GC::Ptr<Layout::NodeWithStyle>);
+    void set_synthetic_pseudo_element_node(Badge<Layout::TreeBuilder>, CSS::PseudoElement, Layout::NodeWithStyle*);
 
-    GC::Ptr<Layout::NodeWithStyle> pseudo_element_layout_node(CSS::PseudoElement) const;
-    GC::Ptr<Layout::NodeWithStyle> pseudo_element_unsafe_layout_node(CSS::PseudoElement) const;
+    Layout::NodeWithStyle* pseudo_element_layout_node(CSS::PseudoElement) const;
+    Layout::NodeWithStyle* pseudo_element_unsafe_layout_node(CSS::PseudoElement) const;
 
     bool has_synthetic_pseudo_elements() const;
     template<OneOf<Layout::TreeBuilder, Document, Node> T>
@@ -704,7 +704,7 @@ private:
     GC::Ptr<ShadowRoot> m_shadow_root;
     GC::Ptr<DOMTokenList> m_part_list;
 
-    GC::Ptr<CSS::ComputedProperties> m_computed_properties;
+    RefPtr<CSS::ComputedProperties> m_computed_properties;
     RefPtr<CSS::CustomPropertyData const> m_custom_property_data;
 
     using PseudoElementData = HashMap<CSS::PseudoElement, GC::Ref<PseudoElement>>;
