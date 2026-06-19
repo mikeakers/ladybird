@@ -25,6 +25,7 @@
 #include <LibWeb/Animations/AnimationEffect.h>
 #include <LibWeb/Animations/DocumentTimeline.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
+#include <LibWeb/CSS/AncestorFilter.h>
 #include <LibWeb/CSS/AnimationEvent.h>
 #include <LibWeb/CSS/CSSAnimation.h>
 #include <LibWeb/CSS/CSSContainerRule.h>
@@ -102,6 +103,18 @@
 namespace Web::CSS {
 
 GC_DEFINE_ALLOCATOR(StyleComputer);
+
+static void for_each_element_hash(DOM::Element const& element, auto callback)
+{
+    callback(ancestor_filter_hash_for_tag_name(element.local_name().ascii_case_insensitive_hash()));
+    if (element.id().has_value())
+        callback(ancestor_filter_hash_for_id(element.id().value().hash()));
+    for (auto const& class_ : element.class_names())
+        callback(ancestor_filter_hash_for_class(class_.hash()));
+    element.for_each_attribute([&](auto& attribute) {
+        callback(ancestor_filter_hash_for_attribute(attribute.name().ascii_case_insensitive_hash()));
+    });
+}
 
 static bool property_affects_font_metrics(PropertyID property_id)
 {
@@ -184,16 +197,16 @@ Optional<String> StyleComputer::user_agent_style_sheet_source(StringView name)
 RuleCache const* StyleComputer::rule_cache_for_cascade_origin(CascadeOrigin cascade_origin, Optional<FlyString const> qualified_layer_name, GC::Ptr<DOM::ShadowRoot const> shadow_root) const
 {
     auto& style_scope = shadow_root ? shadow_root->style_scope() : document().style_scope();
-    style_scope.build_rule_cache_if_needed();
+    auto const& rule_cache = style_scope.rule_cache();
 
     auto const* rule_caches_by_layer = [&]() -> RuleCaches const* {
         switch (cascade_origin) {
         case CascadeOrigin::Author:
-            return &style_scope.m_rule_cache->author_rule_cache;
+            return &rule_cache.author_rule_cache;
         case CascadeOrigin::User:
-            return &style_scope.m_rule_cache->user_rule_cache;
+            return &rule_cache.user_rule_cache;
         case CascadeOrigin::UserAgent:
-            return &style_scope.m_rule_cache->user_agent_rule_cache;
+            return &rule_cache.user_agent_rule_cache;
         default:
             VERIFY_NOT_REACHED();
         }
@@ -216,9 +229,10 @@ RuleCache const* StyleComputer::rule_cache_for_cascade_origin(CascadeOrigin casc
 NonnullRefPtr<InvalidationPlan> StyleComputer::invalidation_plan_for_properties(Vector<InvalidationSet::Property> const& properties, StyleScope const& style_scope) const
 {
     auto result = InvalidationPlan::create();
-    if (!style_scope.m_rule_cache)
+    if (properties.is_empty())
         return result;
-    auto const& invalidation_plans = style_scope.m_rule_cache->style_invalidation_data.invalidation_plans;
+
+    auto const& invalidation_plans = style_scope.style_invalidation_data().invalidation_plans;
     for (auto const& property : properties) {
         if (auto it = invalidation_plans.find(property); it != invalidation_plans.end()) {
             result->include_all_from(*it->value);
@@ -231,8 +245,7 @@ NonnullRefPtr<InvalidationPlan> StyleComputer::invalidation_plan_for_properties(
 
 Vector<HasInvalidationMetadata> const* StyleComputer::has_invalidation_metadata_for_property(InvalidationSet::Property const& property, StyleScope const& style_scope) const
 {
-    if (!style_scope.m_rule_cache)
-        return nullptr;
+    auto const& style_invalidation_data = style_scope.style_invalidation_data();
 
     auto return_bucket_if_present = [](auto const& map, auto const& key) -> Vector<HasInvalidationMetadata> const* {
         auto bucket = map.get(key);
@@ -243,15 +256,15 @@ Vector<HasInvalidationMetadata> const* StyleComputer::has_invalidation_metadata_
 
     switch (property.type) {
     case InvalidationSet::Property::Type::Id:
-        return return_bucket_if_present(style_scope.m_rule_cache->style_invalidation_data.ids_used_in_has_selectors, property.name());
+        return return_bucket_if_present(style_invalidation_data.ids_used_in_has_selectors, property.name());
     case InvalidationSet::Property::Type::Class:
-        return return_bucket_if_present(style_scope.m_rule_cache->style_invalidation_data.class_names_used_in_has_selectors, property.name());
+        return return_bucket_if_present(style_invalidation_data.class_names_used_in_has_selectors, property.name());
     case InvalidationSet::Property::Type::Attribute:
-        return return_bucket_if_present(style_scope.m_rule_cache->style_invalidation_data.attribute_names_used_in_has_selectors, property.name());
+        return return_bucket_if_present(style_invalidation_data.attribute_names_used_in_has_selectors, property.name());
     case InvalidationSet::Property::Type::TagName:
-        return return_bucket_if_present(style_scope.m_rule_cache->style_invalidation_data.tag_names_used_in_has_selectors, property.name());
+        return return_bucket_if_present(style_invalidation_data.tag_names_used_in_has_selectors, property.name());
     case InvalidationSet::Property::Type::PseudoClass:
-        return return_bucket_if_present(style_scope.m_rule_cache->style_invalidation_data.pseudo_classes_used_in_has_selectors, property.value.get<PseudoClass>());
+        return return_bucket_if_present(style_invalidation_data.pseudo_classes_used_in_has_selectors, property.value.get<PseudoClass>());
     default:
         break;
     }
@@ -262,7 +275,7 @@ static bool scope_selector_matches(Selector const& selector, DOM::Element const&
 {
     // A scope boundary match can activate or deactivate rules for descendants of the scope root.
     if (&element == &subject && selector.contains_pseudo_class(PseudoClass::Has))
-        const_cast<DOM::Element&>(element).set_affected_by_has_pseudo_class_in_non_subject_position(true);
+        const_cast<DOM::Element&>(element).set_affected_by_has_pseudo_class_in_non_subject_position();
 
     SelectorEngine::MatchContext context {
         .style_sheet_for_rule = scope_style_sheet,
@@ -375,7 +388,155 @@ static Optional<ResolvedScope> resolve_scope(DOM::AbstractElement abstract_eleme
     return resolve_scope_chain(abstract_element, rule, shadow_host, rule_root, *rule.scope_rule);
 }
 
-Vector<StyleComputer::ScopedMatchingRule> StyleComputer::collect_matching_rules_from_context(DOM::AbstractElement abstract_element, CascadeOrigin cascade_origin, GC::Ptr<DOM::ShadowRoot const> context_shadow_root, Optional<FlyString const> qualified_layer_name) const
+static u64 pseudo_element_style_bit(PseudoElement pseudo_element)
+{
+    VERIFY(to_underlying(pseudo_element) < to_underlying(PseudoElement::KnownPseudoElementCount));
+    return 1ull << to_underlying(pseudo_element);
+}
+
+struct ParentFilterHashCollector {
+    static bool contains_hash(Vector<u32> const& hashes, u32 hash)
+    {
+        for (auto existing_hash : hashes) {
+            if (existing_hash == hash)
+                return true;
+        }
+        return false;
+    }
+
+    static void append_unique_hash(Vector<u32>& hashes, u32 hash)
+    {
+        if (!contains_hash(hashes, hash))
+            hashes.append(hash);
+    }
+
+    static void intersect_hashes(Vector<u32>& hashes, Vector<u32> const& other_hashes)
+    {
+        for (size_t i = 0; i < hashes.size();) {
+            if (contains_hash(other_hashes, hashes[i])) {
+                ++i;
+                continue;
+            }
+            hashes.remove(i);
+        }
+    }
+
+    static Vector<u32> hashes_from_simple_selector(Selector::SimpleSelector const& simple_selector)
+    {
+        Vector<u32> hashes;
+        switch (simple_selector.type) {
+        case Selector::SimpleSelector::Type::Id:
+            hashes.append(ancestor_filter_hash_for_id(simple_selector.name().hash()));
+            break;
+        case Selector::SimpleSelector::Type::Class:
+            hashes.append(ancestor_filter_hash_for_class(simple_selector.name().hash()));
+            break;
+        case Selector::SimpleSelector::Type::TagName:
+            hashes.append(ancestor_filter_hash_for_tag_name(simple_selector.qualified_name().name.lowercase_name.hash()));
+            break;
+        case Selector::SimpleSelector::Type::Attribute:
+            hashes.append(ancestor_filter_hash_for_attribute(simple_selector.attribute().qualified_name.name.lowercase_name.hash()));
+            break;
+        case Selector::SimpleSelector::Type::PseudoClass: {
+            auto const& pseudo_class = simple_selector.pseudo_class();
+            if (pseudo_class.type != PseudoClass::Is && pseudo_class.type != PseudoClass::Where)
+                break;
+
+            hashes = common_hashes_from_selector_list(pseudo_class.argument_selector_list);
+            break;
+        }
+        default:
+            break;
+        }
+        return hashes;
+    }
+
+    static Vector<u32> hashes_from_compound(Selector::CompoundSelector const& compound_selector)
+    {
+        Vector<u32> hashes;
+        for (auto const& simple_selector : compound_selector.simple_selectors) {
+            for (auto hash : hashes_from_simple_selector(simple_selector))
+                append_unique_hash(hashes, hash);
+        }
+        return hashes;
+    }
+
+    static Vector<u32> hashes_from_selector_subject(Selector const& selector)
+    {
+        auto const& compound_selectors = selector.compound_selectors();
+        if (compound_selectors.is_empty())
+            return {};
+        return hashes_from_compound(compound_selectors.last());
+    }
+
+    static Vector<u32> common_hashes_from_selector_list(SelectorList const& selector_list)
+    {
+        if (selector_list.is_empty())
+            return {};
+
+        Optional<Vector<u32>> common_hashes;
+        for (auto const& argument_selector : selector_list) {
+            auto hashes = hashes_from_selector_subject(*argument_selector);
+            if (!common_hashes.has_value()) {
+                common_hashes = move(hashes);
+                continue;
+            }
+
+            intersect_hashes(common_hashes.value(), hashes);
+            if (common_hashes->is_empty())
+                break;
+        }
+
+        return common_hashes.release_value();
+    }
+};
+
+static Vector<u32> parent_filter_hashes_for_selector(Selector const& selector)
+{
+    if (selector.target_pseudo_element().has_value())
+        return {};
+
+    auto const& compound_selectors = selector.compound_selectors();
+    if (compound_selectors.size() < 2)
+        return {};
+    if (compound_selectors.last().combinator != Selector::Combinator::ImmediateChild)
+        return {};
+
+    // The compound immediately to the left of the subject must match the
+    // subject's parent. Only collect hashes that are required on that parent
+    // itself; ancestor requirements inside selector-list pseudos remain the
+    // job of the normal ancestor filter.
+    return ParentFilterHashCollector::hashes_from_compound(compound_selectors[compound_selectors.size() - 2]);
+}
+
+static bool parent_filter_may_contain_all(DOM::Element const& parent, Vector<u32> const& required_hashes)
+{
+    Vector<u32> parent_hashes;
+    for_each_element_hash(parent, [&](u32 hash) {
+        ParentFilterHashCollector::append_unique_hash(parent_hashes, hash);
+    });
+
+    for (auto hash : required_hashes) {
+        if (!ParentFilterHashCollector::contains_hash(parent_hashes, hash))
+            return false;
+    }
+    return true;
+}
+
+static bool should_reject_with_parent_filter(DOM::AbstractElement abstract_element, Selector const& selector)
+{
+    auto required_hashes = parent_filter_hashes_for_selector(selector);
+    if (required_hashes.is_empty())
+        return false;
+
+    auto parent = abstract_element.parent_element();
+    if (!parent)
+        return true;
+
+    return !parent_filter_may_contain_all(*parent, required_hashes);
+}
+
+Vector<StyleComputer::ScopedMatchingRule> StyleComputer::collect_matching_rules_from_context(DOM::AbstractElement abstract_element, CascadeOrigin cascade_origin, GC::Ptr<DOM::ShadowRoot const> context_shadow_root, Optional<FlyString const> qualified_layer_name, u64* matching_pseudo_element_styles) const
 {
     auto const& root_node = abstract_element.element().root();
     auto shadow_root = as_if<DOM::ShadowRoot>(root_node);
@@ -392,6 +553,36 @@ Vector<StyleComputer::ScopedMatchingRule> StyleComputer::collect_matching_rules_
     VERIFY(rules_to_run.is_empty());
     ScopeGuard clear_rules_to_run = [&] {
         rules_to_run.clear_with_capacity();
+    };
+
+    // Multi-bucketed pseudo-element rules can be reached through more than one
+    // originating-element key, e.g. `:is(.foo, .bar)::before` on an element with
+    // both classes. Use a generation stamp instead of a per-element HashSet so
+    // duplicate suppression stays an indexed load/store in the hot path.
+    u64 multi_bucket_rule_generation = 0;
+    auto next_multi_bucket_rule_generation = [&]() {
+        ++m_multi_bucket_rule_generation;
+        if (m_multi_bucket_rule_generation == 0) {
+            for (auto& generation : m_seen_multi_bucket_rule_generations)
+                generation = 0;
+            ++m_multi_bucket_rule_generation;
+        }
+        return m_multi_bucket_rule_generation;
+    };
+    auto was_multi_bucket_rule_seen = [&](MatchingRule const& rule) {
+        if (rule.multi_bucket_rule_index == 0)
+            return false;
+
+        if (multi_bucket_rule_generation == 0)
+            multi_bucket_rule_generation = next_multi_bucket_rule_generation();
+
+        auto const index = static_cast<size_t>(rule.multi_bucket_rule_index - 1);
+        if (m_seen_multi_bucket_rule_generations.size() <= index)
+            m_seen_multi_bucket_rule_generations.resize(index + 1);
+        if (m_seen_multi_bucket_rule_generations[index] == multi_bucket_rule_generation)
+            return true;
+        m_seen_multi_bucket_rule_generations[index] = multi_bucket_rule_generation;
+        return false;
     };
 
     auto add_rule_to_run = [&](MatchingRule const& rule_to_run, GC::Ptr<DOM::ShadowRoot const> rule_root) {
@@ -422,6 +613,8 @@ Vector<StyleComputer::ScopedMatchingRule> StyleComputer::collect_matching_rules_
         auto const& selector = rule_to_run.selector;
         if (selector.can_use_ancestor_filter() && should_reject_with_ancestor_filter(selector))
             return;
+        if (should_reject_with_parent_filter(abstract_element, selector))
+            return;
 
         rules_to_run.unchecked_append({
             .rule = &rule_to_run,
@@ -441,6 +634,8 @@ Vector<StyleComputer::ScopedMatchingRule> StyleComputer::collect_matching_rules_
             //        a query for a different pseudo-element type.
             auto queried_pseudo_element = *abstract_element.pseudo_element();
             for (auto const& rule : rules) {
+                if (was_multi_bucket_rule_seen(rule))
+                    continue;
                 auto const& target_pseudo_element = rule.selector.target_pseudo_element();
                 if (target_pseudo_element != queried_pseudo_element)
                     continue;
@@ -450,17 +645,34 @@ Vector<StyleComputer::ScopedMatchingRule> StyleComputer::collect_matching_rules_
             }
         } else {
             for (auto const& rule : rules) {
-                if ((rule.slotted || rule.contains_part_pseudo_element || !rule.contains_pseudo_element) && filter_namespace_rule(element_namespace_uri, rule))
+                if (was_multi_bucket_rule_seen(rule))
+                    continue;
+                if (!filter_namespace_rule(element_namespace_uri, rule))
+                    continue;
+                if (rule.selector.target_pseudo_element().has_value()) {
+                    if (matching_pseudo_element_styles)
+                        add_rule_to_run(rule, rule_root);
+                    continue;
+                }
+                if (rule.slotted || rule.contains_part_pseudo_element || !rule.contains_pseudo_element)
                     add_rule_to_run(rule, rule_root);
             }
         }
     };
 
     auto add_rules_from_cache = [&](RuleCache const& rule_cache, GC::Ptr<DOM::ShadowRoot const> rule_root) {
-        rule_cache.for_each_matching_rules(abstract_element, [&](auto const& matching_rules) {
+        multi_bucket_rule_generation = next_multi_bucket_rule_generation();
+        Function<bool(u32)> may_contain_ancestor_hash = [&](u32 hash) { return m_ancestor_filter->may_contain(hash); };
+        rule_cache.for_each_matching_rules(abstract_element, may_contain_ancestor_hash, [&](auto const& matching_rules) {
             add_rules_to_run(matching_rules, rule_root);
             return IterationDecision::Continue;
         });
+        if (!abstract_element.pseudo_element().has_value() && matching_pseudo_element_styles) {
+            rule_cache.for_each_matching_pseudo_element_rules(abstract_element, may_contain_ancestor_hash, [&](auto const& matching_rules) {
+                add_rules_to_run(matching_rules, rule_root);
+                return IterationDecision::Continue;
+            });
+        }
     };
 
     if (auto const* rule_cache = rule_cache_for_cascade_origin(cascade_origin, qualified_layer_name, context_shadow_root))
@@ -539,6 +751,20 @@ Vector<StyleComputer::ScopedMatchingRule> StyleComputer::collect_matching_rules_
             .collect_per_element_selector_involvement_metadata = true,
             .has_result_cache = m_has_result_cache.ptr(),
         };
+        if (!abstract_element.pseudo_element().has_value() && matching_pseudo_element_styles) {
+            if (auto pseudo_element = selector.target_pseudo_element(); pseudo_element.has_value()) {
+                if (is_synthetic_pseudo_element(*pseudo_element)) {
+                    auto pseudo_element_bit = pseudo_element_style_bit(*pseudo_element);
+                    if (*matching_pseudo_element_styles & pseudo_element_bit)
+                        continue;
+                    if (selector.contains_pseudo_class(PseudoClass::Has)
+                        || SelectorEngine::matches_originating_element_for_pseudo_element(selector, *pseudo_element, abstract_element, shadow_host_to_use, context, resolved_scope->root)) {
+                        *matching_pseudo_element_styles |= pseudo_element_bit;
+                    }
+                }
+                continue;
+            }
+        }
         if (!SelectorEngine::matches(selector, abstract_element, shadow_host_to_use, context, resolved_scope->root))
             continue;
         if (rule.container_rule && rule.container_rule->contains_size_feature()) {
@@ -1414,6 +1640,11 @@ void StyleComputer::start_needed_transitions(ComputedProperties const& previous_
 
 StyleComputer::MatchingRuleSet StyleComputer::build_matching_rule_set(DOM::AbstractElement abstract_element, bool& did_match_any_pseudo_element_rules, ComputeStyleMode mode) const
 {
+    MatchingRuleSet matching_rule_set;
+    u64* matching_pseudo_element_styles = nullptr;
+    if (mode == ComputeStyleMode::Normal && !abstract_element.pseudo_element().has_value())
+        matching_pseudo_element_styles = &matching_rule_set.matching_pseudo_element_styles;
+
     auto collect_author_contexts = [&] {
         Vector<GC::Ptr<DOM::ShadowRoot const>, 4> context_shadow_roots;
         auto append_context = [&](GC::Ptr<DOM::ShadowRoot const> shadow_root) {
@@ -1456,20 +1687,20 @@ StyleComputer::MatchingRuleSet StyleComputer::build_matching_rule_set(DOM::Abstr
 
         for (auto shadow_root : context_shadow_roots) {
             auto& context_style_scope = shadow_root ? shadow_root->style_scope() : document().style_scope();
-            context_style_scope.build_rule_cache_if_needed();
+            auto const& context_rule_cache = context_style_scope.rule_cache();
 
             ContextMatchingRules context {
                 .shadow_root = shadow_root,
                 .author_rules = {},
             };
 
-            for (auto const& layer_name : context_style_scope.m_rule_cache->qualified_layer_names_in_order) {
-                auto layer_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::Author, shadow_root, layer_name);
+            for (auto const& layer_name : context_rule_cache.qualified_layer_names_in_order) {
+                auto layer_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::Author, shadow_root, layer_name, matching_pseudo_element_styles);
                 sort_matching_rules(layer_rules);
                 context.author_rules.append({ layer_name, layer_rules });
             }
 
-            auto unlayered_author_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::Author, shadow_root);
+            auto unlayered_author_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::Author, shadow_root, {}, matching_pseudo_element_styles);
             sort_matching_rules(unlayered_author_rules);
             context.author_rules.append({ {}, unlayered_author_rules });
 
@@ -1480,10 +1711,9 @@ StyleComputer::MatchingRuleSet StyleComputer::build_matching_rule_set(DOM::Abstr
     };
 
     // First, we collect all the CSS rules whose selectors match `element`:
-    MatchingRuleSet matching_rule_set;
-    matching_rule_set.user_agent_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::UserAgent, nullptr);
+    matching_rule_set.user_agent_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::UserAgent, nullptr, {}, matching_pseudo_element_styles);
     sort_matching_rules(matching_rule_set.user_agent_rules);
-    matching_rule_set.user_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::User, nullptr);
+    matching_rule_set.user_rules = collect_matching_rules_from_context(abstract_element, CascadeOrigin::User, nullptr, {}, matching_pseudo_element_styles);
     sort_matching_rules(matching_rule_set.user_rules);
     matching_rule_set.author_contexts = collect_author_contexts();
 
@@ -2636,6 +2866,7 @@ RefPtr<ComputedProperties> StyleComputer::compute_style_impl(DOM::AbstractElemen
     }
 
     auto computed_properties = compute_properties(abstract_element, cascaded_properties);
+    computed_properties->set_has_pseudo_element_styles(matching_rule_set.matching_pseudo_element_styles);
 
     if (did_change_custom_properties.has_value()) {
         auto new_custom_property_data = abstract_element.custom_property_data();
@@ -2971,7 +3202,145 @@ struct SimplifiedSelectorForBucketing {
     FlyString name;
 };
 
-static Optional<SimplifiedSelectorForBucketing> is_roundabout_selector_bucketable_as_something_simpler(CSS::Selector::SimpleSelector const& simple_selector)
+static Optional<SimplifiedSelectorForBucketing> bucket_for_is_or_where_selector(CSS::Selector::SimpleSelector const&);
+static Optional<Vector<SimplifiedSelectorForBucketing>> buckets_for_is_or_where_selector(CSS::Selector::SimpleSelector const&);
+static Optional<PseudoClass> subject_pseudo_class_bucket_for_is_or_where_selector(CSS::Selector::SimpleSelector const&);
+
+static bool simplified_selectors_for_bucketing_are_equal(SimplifiedSelectorForBucketing const& a, SimplifiedSelectorForBucketing const& b)
+{
+    return a.type == b.type && a.name == b.name;
+}
+
+static void append_unique_simplified_selector_for_bucketing(Vector<SimplifiedSelectorForBucketing>& buckets, SimplifiedSelectorForBucketing bucket)
+{
+    for (auto const& existing_bucket : buckets) {
+        if (simplified_selectors_for_bucketing_are_equal(existing_bucket, bucket))
+            return;
+    }
+    buckets.append(move(bucket));
+}
+
+static bool subject_pseudo_class_is_bucketable(PseudoClass pseudo_class)
+{
+    switch (pseudo_class) {
+    case PseudoClass::Active:
+    case PseudoClass::AnyLink:
+    case PseudoClass::Checked:
+    case PseudoClass::Disabled:
+    case PseudoClass::Enabled:
+    case PseudoClass::Focus:
+    case PseudoClass::FocusVisible:
+    case PseudoClass::FocusWithin:
+    case PseudoClass::Fullscreen:
+    case PseudoClass::Heading:
+    case PseudoClass::Host:
+    case PseudoClass::Hover:
+    case PseudoClass::Link:
+    case PseudoClass::LocalLink:
+    case PseudoClass::PlaceholderShown:
+    case PseudoClass::Target:
+    case PseudoClass::Unchecked:
+    case PseudoClass::Visited:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static u8 subject_pseudo_class_bucket_priority(PseudoClass pseudo_class)
+{
+    switch (pseudo_class) {
+    case PseudoClass::Host:
+        return 110;
+    case PseudoClass::FocusVisible:
+        return 100;
+    case PseudoClass::Focus:
+        return 90;
+    case PseudoClass::Active:
+    case PseudoClass::Fullscreen:
+    case PseudoClass::Target:
+    case PseudoClass::Heading:
+        return 80;
+    case PseudoClass::Checked:
+    case PseudoClass::Disabled:
+    case PseudoClass::LocalLink:
+    case PseudoClass::PlaceholderShown:
+    case PseudoClass::Visited:
+        return 70;
+    case PseudoClass::AnyLink:
+    case PseudoClass::Link:
+        return 60;
+    case PseudoClass::Hover:
+        return 50;
+    case PseudoClass::FocusWithin:
+        return 40;
+    case PseudoClass::Enabled:
+    case PseudoClass::Unchecked:
+        return 30;
+    default:
+        VERIFY_NOT_REACHED();
+    }
+}
+
+static Optional<PseudoClass> subject_pseudo_class_bucket_for_compound_selector(CSS::Selector::CompoundSelector const& compound_selector)
+{
+    Optional<PseudoClass> best_bucket;
+
+    auto consider_bucket = [&](PseudoClass pseudo_class) {
+        if (!best_bucket.has_value()
+            || subject_pseudo_class_bucket_priority(pseudo_class) > subject_pseudo_class_bucket_priority(best_bucket.value())) {
+            best_bucket = pseudo_class;
+        }
+    };
+
+    for (auto const& simple_selector : compound_selector.simple_selectors.in_reverse()) {
+        if (simple_selector.type != CSS::Selector::SimpleSelector::Type::PseudoClass)
+            continue;
+
+        auto const pseudo_class = simple_selector.pseudo_class().type;
+        if (subject_pseudo_class_is_bucketable(pseudo_class)) {
+            consider_bucket(pseudo_class);
+            continue;
+        }
+
+        if (auto bucket = subject_pseudo_class_bucket_for_is_or_where_selector(simple_selector); bucket.has_value())
+            consider_bucket(bucket.value());
+    }
+
+    return best_bucket;
+}
+
+static Optional<SimplifiedSelectorForBucketing> bucket_for_compound_selector(CSS::Selector::CompoundSelector const& compound_selector)
+{
+    Optional<SimplifiedSelectorForBucketing> attribute_bucket;
+    for (auto const& simple_selector : compound_selector.simple_selectors.in_reverse()) {
+        if (simple_selector.type == CSS::Selector::SimpleSelector::Type::Class
+            || simple_selector.type == CSS::Selector::SimpleSelector::Type::Id) {
+            return SimplifiedSelectorForBucketing { simple_selector.type, simple_selector.name() };
+        }
+
+        if (simple_selector.type == CSS::Selector::SimpleSelector::Type::TagName) {
+            return SimplifiedSelectorForBucketing { simple_selector.type, simple_selector.qualified_name().name.lowercase_name };
+        }
+
+        if (simple_selector.type == CSS::Selector::SimpleSelector::Type::Attribute) {
+            if (!attribute_bucket.has_value())
+                attribute_bucket = SimplifiedSelectorForBucketing { simple_selector.type, simple_selector.attribute().qualified_name.name.lowercase_name };
+            continue;
+        }
+
+        if (auto bucket = bucket_for_is_or_where_selector(simple_selector); bucket.has_value()) {
+            if (bucket->type != CSS::Selector::SimpleSelector::Type::Attribute)
+                return bucket;
+            if (!attribute_bucket.has_value())
+                attribute_bucket = bucket.release_value();
+        }
+    }
+
+    return attribute_bucket;
+}
+
+static Optional<SimplifiedSelectorForBucketing> bucket_for_is_or_where_selector(CSS::Selector::SimpleSelector const& simple_selector)
 {
     if (simple_selector.type != CSS::Selector::SimpleSelector::Type::PseudoClass)
         return {};
@@ -2980,26 +3349,143 @@ static Optional<SimplifiedSelectorForBucketing> is_roundabout_selector_bucketabl
         && simple_selector.pseudo_class().type != CSS::PseudoClass::Where)
         return {};
 
-    if (simple_selector.pseudo_class().argument_selector_list.size() != 1)
+    auto const& selector_list = simple_selector.pseudo_class().argument_selector_list;
+    if (selector_list.is_empty())
         return {};
 
-    auto const& argument_selector = *simple_selector.pseudo_class().argument_selector_list.first();
+    Optional<SimplifiedSelectorForBucketing> common_bucket;
+    for (auto const& argument_selector : selector_list) {
+        auto bucket = bucket_for_compound_selector(argument_selector->compound_selectors().last());
+        if (!bucket.has_value())
+            return {};
+        if (!common_bucket.has_value()) {
+            common_bucket = bucket.release_value();
+            continue;
+        }
+        if (common_bucket->type != bucket->type || common_bucket->name != bucket->name)
+            return {};
+    }
+    return common_bucket;
+}
 
-    auto const& compound_selector = argument_selector.compound_selectors().last();
-    if (compound_selector.simple_selectors.size() != 1)
+static Optional<Vector<SimplifiedSelectorForBucketing>> buckets_for_is_or_where_selector(CSS::Selector::SimpleSelector const& simple_selector)
+{
+    if (simple_selector.type != CSS::Selector::SimpleSelector::Type::PseudoClass)
         return {};
 
-    auto const& inner_simple_selector = compound_selector.simple_selectors.first();
-    if (inner_simple_selector.type == CSS::Selector::SimpleSelector::Type::Class
-        || inner_simple_selector.type == CSS::Selector::SimpleSelector::Type::Id) {
-        return SimplifiedSelectorForBucketing { inner_simple_selector.type, inner_simple_selector.name() };
+    if (simple_selector.pseudo_class().type != CSS::PseudoClass::Is
+        && simple_selector.pseudo_class().type != CSS::PseudoClass::Where)
+        return {};
+
+    auto const& selector_list = simple_selector.pseudo_class().argument_selector_list;
+    if (selector_list.is_empty())
+        return {};
+
+    Vector<SimplifiedSelectorForBucketing> buckets;
+    for (auto const& argument_selector : selector_list) {
+        auto bucket = bucket_for_compound_selector(argument_selector->compound_selectors().last());
+        if (!bucket.has_value())
+            return {};
+        append_unique_simplified_selector_for_bucketing(buckets, bucket.release_value());
     }
 
-    if (inner_simple_selector.type == CSS::Selector::SimpleSelector::Type::TagName) {
-        return SimplifiedSelectorForBucketing { inner_simple_selector.type, inner_simple_selector.qualified_name().name.lowercase_name };
-    }
+    if (buckets.size() < 2)
+        return {};
+    return buckets;
+}
 
+static Optional<PseudoClass> subject_pseudo_class_bucket_for_is_or_where_selector(CSS::Selector::SimpleSelector const& simple_selector)
+{
+    if (simple_selector.type != CSS::Selector::SimpleSelector::Type::PseudoClass)
+        return {};
+
+    if (simple_selector.pseudo_class().type != CSS::PseudoClass::Is
+        && simple_selector.pseudo_class().type != CSS::PseudoClass::Where)
+        return {};
+
+    auto const& selector_list = simple_selector.pseudo_class().argument_selector_list;
+    if (selector_list.is_empty())
+        return {};
+
+    Optional<PseudoClass> common_bucket;
+    for (auto const& argument_selector : selector_list) {
+        auto bucket = subject_pseudo_class_bucket_for_compound_selector(argument_selector->compound_selectors().last());
+        if (!bucket.has_value())
+            return {};
+        if (!common_bucket.has_value()) {
+            common_bucket = bucket.value();
+            continue;
+        }
+        if (common_bucket.value() != bucket.value())
+            return {};
+    }
+    return common_bucket;
+}
+
+static Optional<u32> ancestor_hash_bucket_for_selector(Selector const& selector)
+{
+    if (!selector.can_use_ancestor_filter())
+        return {};
+
+    for (auto hash : selector.ancestor_hashes()) {
+        if (hash == 0)
+            break;
+        return hash;
+    }
     return {};
+}
+
+static bool matches_hover_pseudo_class_for_rule_bucket(DOM::Element const& element)
+{
+    auto* hovered_node = element.document().hovered_node();
+    if (!hovered_node)
+        return false;
+    if (&element == hovered_node)
+        return true;
+    return element.is_shadow_including_ancestor_of(*hovered_node);
+}
+
+static bool matches_subject_pseudo_class_bucket(PseudoClass pseudo_class, DOM::Element const& element)
+{
+    switch (pseudo_class) {
+    case PseudoClass::Active:
+        return element.is_being_activated();
+    case PseudoClass::AnyLink:
+    case PseudoClass::Link:
+        return element.matches_link_pseudo_class();
+    case PseudoClass::Checked:
+        return element.matches_checked_pseudo_class();
+    case PseudoClass::Disabled:
+        return element.matches_disabled_pseudo_class();
+    case PseudoClass::Enabled:
+        return element.matches_enabled_pseudo_class();
+    case PseudoClass::Focus:
+        return element.is_focused();
+    case PseudoClass::FocusVisible:
+        return element.is_focused() && element.should_indicate_focus();
+    case PseudoClass::FocusWithin:
+        return element.matches_focus_within_pseudo_class();
+    case PseudoClass::Fullscreen:
+        return element.is_fullscreen_element();
+    case PseudoClass::Heading:
+        return element.is_html_heading_element();
+    case PseudoClass::Host:
+        return element.is_shadow_host();
+    case PseudoClass::Hover:
+        return matches_hover_pseudo_class_for_rule_bucket(element);
+    case PseudoClass::LocalLink:
+        return element.matches_local_link_pseudo_class();
+    case PseudoClass::PlaceholderShown:
+        return element.matches_placeholder_shown_pseudo_class();
+    case PseudoClass::Target:
+        return element.is_target();
+    case PseudoClass::Unchecked:
+        return element.matches_unchecked_pseudo_class();
+    case PseudoClass::Visited:
+        return element.matches_visited_pseudo_class();
+    default:
+        VERIFY_NOT_REACHED();
+    }
 }
 
 NonnullRefPtr<StyleValue const> StyleComputer::compute_value_of_custom_property(DOM::AbstractElement abstract_element, Utf16FlyString const& name, Optional<Parser::GuardedSubstitutionContexts&> guarded_contexts)
@@ -3692,18 +4178,6 @@ NonnullRefPtr<StyleValue const> StyleComputer::compute_math_depth(NonnullRefPtr<
     return IntegerStyleValue::create(inherited_math_depth);
 }
 
-static void for_each_element_hash(DOM::Element const& element, auto callback)
-{
-    callback(element.local_name().ascii_case_insensitive_hash());
-    if (element.id().has_value())
-        callback(element.id().value().hash());
-    for (auto const& class_ : element.class_names())
-        callback(class_.hash());
-    element.for_each_attribute([&](auto& attribute) {
-        callback(attribute.name().ascii_case_insensitive_hash());
-    });
-}
-
 void StyleComputer::reset_ancestor_filter()
 {
     m_ancestor_filter->clear();
@@ -3731,41 +4205,87 @@ void StyleComputer::pop_ancestor(DOM::Element const& element)
     });
 }
 
-void RuleCache::add_rule(MatchingRule const& matching_rule, Optional<PseudoElement> pseudo_element, bool contains_root_pseudo_class)
+template<typename RuleBuckets>
+static void add_rule_to_simplified_selector_bucket(RuleBuckets& rule_buckets, MatchingRule const& matching_rule, SimplifiedSelectorForBucketing const& bucket)
 {
-    if (matching_rule.slotted) {
-        slotted_rules.append(matching_rule);
+    if (bucket.type == Selector::SimpleSelector::Type::Id) {
+        rule_buckets.rules_by_id.ensure(bucket.name).append(matching_rule);
         return;
     }
-    if (matching_rule.contains_part_pseudo_element) {
-        part_rules.append(matching_rule);
+    if (bucket.type == Selector::SimpleSelector::Type::Class) {
+        rule_buckets.rules_by_class.ensure(bucket.name).append(matching_rule);
         return;
     }
+    if (bucket.type == Selector::SimpleSelector::Type::TagName) {
+        rule_buckets.rules_by_tag_name.ensure(bucket.name).append(matching_rule);
+        return;
+    }
+    if (bucket.type == Selector::SimpleSelector::Type::Attribute) {
+        rule_buckets.rules_by_attribute_name.ensure(bucket.name).append(matching_rule);
+        return;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+template<typename RuleBuckets>
+static bool add_rule_to_multiple_is_or_where_buckets(RuleBuckets& rule_buckets, MatchingRule const& matching_rule, Selector::CompoundSelector const& bucket_compound_selector, u32& next_multi_bucket_rule_index)
+{
+    // Pseudo-element style discovery walks originating-element buckets while
+    // computing the originating element's style. If a pseudo selector would
+    // otherwise fall into `other`, split `:is()`/`:where()` alternatives across
+    // their cheap subject buckets so we avoid trying the rule for every element.
+    Optional<Vector<SimplifiedSelectorForBucketing>> buckets;
+    for (auto const& simple_selector : bucket_compound_selector.simple_selectors.in_reverse()) {
+        auto candidate_buckets = buckets_for_is_or_where_selector(simple_selector);
+        if (!candidate_buckets.has_value())
+            continue;
+        buckets = candidate_buckets.release_value();
+        break;
+    }
+
+    if (!buckets.has_value())
+        return false;
+
+    VERIFY(next_multi_bucket_rule_index < NumericLimits<u32>::max());
+    auto multi_bucket_matching_rule = matching_rule;
+    multi_bucket_matching_rule.multi_bucket_rule_index = ++next_multi_bucket_rule_index;
+    for (auto const& bucket : *buckets)
+        add_rule_to_simplified_selector_bucket(rule_buckets, multi_bucket_matching_rule, bucket);
+    return true;
+}
+
+template<typename RuleBuckets>
+static void add_rule_to_rule_buckets(RuleBuckets& rule_buckets, MatchingRule const& matching_rule, Selector::CompoundSelector const& bucket_compound_selector, bool contains_root_pseudo_class, SubjectPseudoClassBuckets subject_pseudo_class_buckets, AncestorHashBuckets ancestor_hash_buckets)
+{
     // NOTE: We traverse the simple selectors in reverse order to make sure that class/ID buckets are preferred over tag buckets
     //       in the common case of div.foo or div#foo selectors.
     auto add_to_id_bucket = [&](FlyString const& name) {
-        rules_by_id.ensure(name).append(matching_rule);
+        rule_buckets.rules_by_id.ensure(name).append(matching_rule);
     };
 
     auto add_to_class_bucket = [&](FlyString const& name) {
-        rules_by_class.ensure(name).append(matching_rule);
+        rule_buckets.rules_by_class.ensure(name).append(matching_rule);
     };
 
     auto add_to_tag_name_bucket = [&](FlyString const& name) {
-        rules_by_tag_name.ensure(name).append(matching_rule);
+        rule_buckets.rules_by_tag_name.ensure(name).append(matching_rule);
     };
 
-    auto const& bucket_compound_selector = [&]() -> Selector::CompoundSelector const& {
-        if (matching_rule.contains_pseudo_element && pseudo_element.has_value()) {
-            // Normalized pseudo-element selectors end with a pseudo-element compound; bucket them
-            // by the originating element compound so `.foo::before` keeps using the `.foo` bucket.
-            for (auto const& compound_selector : matching_rule.selector.compound_selectors().in_reverse()) {
-                if (compound_selector.combinator != Selector::Combinator::PseudoElement)
-                    return compound_selector;
-            }
+    auto add_to_attribute_bucket = [&](FlyString const& name) {
+        rule_buckets.rules_by_attribute_name.ensure(name).append(matching_rule);
+    };
+
+    auto add_to_subject_pseudo_class_bucket = [&](PseudoClass pseudo_class) {
+        rule_buckets.rules_by_subject_pseudo_class[to_underlying(pseudo_class)].append(matching_rule);
+    };
+
+    Optional<PseudoClass> subject_pseudo_class_bucket;
+    auto consider_subject_pseudo_class_bucket = [&](PseudoClass pseudo_class) {
+        if (!subject_pseudo_class_bucket.has_value()
+            || subject_pseudo_class_bucket_priority(pseudo_class) > subject_pseudo_class_bucket_priority(subject_pseudo_class_bucket.value())) {
+            subject_pseudo_class_bucket = pseudo_class;
         }
-        return matching_rule.selector.compound_selectors().last();
-    }();
+    };
 
     for (auto const& simple_selector : bucket_compound_selector.simple_selectors.in_reverse()) {
         if (simple_selector.type == Selector::SimpleSelector::Type::Id) {
@@ -3780,8 +4300,9 @@ void RuleCache::add_rule(MatchingRule const& matching_rule, Optional<PseudoEleme
             add_to_tag_name_bucket(simple_selector.qualified_name().name.lowercase_name);
             return;
         }
-        // NOTE: Selectors like `:is/where(.foo)` and `:is/where(.foo .bar)` are bucketed as class selectors for `foo` and `bar` respectively.
-        if (auto simplified = is_roundabout_selector_bucketable_as_something_simpler(simple_selector); simplified.has_value()) {
+        // NOTE: Single-argument :is()/:where() selectors can be bucketed by a mandatory
+        //       id, class, tag, or attribute in their rightmost compound selector.
+        if (auto simplified = bucket_for_is_or_where_selector(simple_selector); simplified.has_value()) {
             if (simplified->type == Selector::SimpleSelector::Type::TagName) {
                 add_to_tag_name_bucket(simplified->name);
                 return;
@@ -3794,70 +4315,176 @@ void RuleCache::add_rule(MatchingRule const& matching_rule, Optional<PseudoEleme
                 add_to_id_bucket(simplified->name);
                 return;
             }
-        }
-    }
-
-    if (matching_rule.contains_pseudo_element && pseudo_element.has_value()) {
-        if (Selector::PseudoElementSelector::is_known_pseudo_element_type(pseudo_element.value())) {
-            rules_by_pseudo_element[to_underlying(pseudo_element.value())].append(matching_rule);
-        } else {
-            // NOTE: We don't cache rules for unknown pseudo-elements. They can't match anything anyway.
-        }
-    } else if (contains_root_pseudo_class) {
-        root_rules.append(matching_rule);
-    } else {
-        for (auto const& simple_selector : matching_rule.selector.compound_selectors().last().simple_selectors) {
-            if (simple_selector.type == Selector::SimpleSelector::Type::Attribute) {
-                rules_by_attribute_name.ensure(simple_selector.attribute().qualified_name.name.lowercase_name).append(matching_rule);
+            if (simplified->type == Selector::SimpleSelector::Type::Attribute) {
+                add_to_attribute_bucket(simplified->name);
                 return;
             }
         }
-        other_rules.append(matching_rule);
+
+        if (simple_selector.type == Selector::SimpleSelector::Type::PseudoClass) {
+            auto const pseudo_class = simple_selector.pseudo_class().type;
+            if (subject_pseudo_class_is_bucketable(pseudo_class)) {
+                consider_subject_pseudo_class_bucket(pseudo_class);
+                continue;
+            }
+            if (auto bucket = subject_pseudo_class_bucket_for_is_or_where_selector(simple_selector); bucket.has_value())
+                consider_subject_pseudo_class_bucket(bucket.value());
+        }
+    }
+
+    if (contains_root_pseudo_class) {
+        rule_buckets.root_rules.append(matching_rule);
+    } else {
+        for (auto const& simple_selector : bucket_compound_selector.simple_selectors) {
+            if (simple_selector.type == Selector::SimpleSelector::Type::Attribute) {
+                add_to_attribute_bucket(simple_selector.attribute().qualified_name.name.lowercase_name);
+                return;
+            }
+        }
+        if (subject_pseudo_class_buckets == SubjectPseudoClassBuckets::Yes && subject_pseudo_class_bucket.has_value()) {
+            add_to_subject_pseudo_class_bucket(subject_pseudo_class_bucket.value());
+            return;
+        }
+        if (ancestor_hash_buckets == AncestorHashBuckets::Yes) {
+            if (auto ancestor_hash = ancestor_hash_bucket_for_selector(matching_rule.selector); ancestor_hash.has_value()) {
+                rule_buckets.rules_by_ancestor_hash.ensure(ancestor_hash.value()).append(matching_rule);
+                return;
+            }
+        }
+        rule_buckets.other_rules.append(matching_rule);
     }
 }
 
-void RuleCache::for_each_matching_rules(DOM::AbstractElement abstract_element, Function<IterationDecision(Vector<MatchingRule> const&)> callback) const
+template<typename RuleBuckets>
+static IterationDecision for_each_matching_rule_bucket(DOM::AbstractElement abstract_element, RuleBuckets const& rule_buckets, Function<bool(u32)> const& may_contain_ancestor_hash, Function<IterationDecision(Vector<MatchingRule> const&)> const& callback)
 {
     for (auto const& class_name : abstract_element.element().class_names()) {
-        if (auto it = rules_by_class.find(class_name); it != rules_by_class.end()) {
+        if (auto it = rule_buckets.rules_by_class.find(class_name); it != rule_buckets.rules_by_class.end()) {
             if (callback(it->value) == IterationDecision::Break)
-                return;
+                return IterationDecision::Break;
         }
     }
     if (auto id = abstract_element.element().id(); id.has_value()) {
-        if (auto it = rules_by_id.find(id.value()); it != rules_by_id.end()) {
+        if (auto it = rule_buckets.rules_by_id.find(id.value()); it != rule_buckets.rules_by_id.end()) {
             if (callback(it->value) == IterationDecision::Break)
-                return;
+                return IterationDecision::Break;
         }
     }
-    if (auto it = rules_by_tag_name.find(abstract_element.element().lowercased_local_name()); it != rules_by_tag_name.end()) {
+    if (auto it = rule_buckets.rules_by_tag_name.find(abstract_element.element().lowercased_local_name()); it != rule_buckets.rules_by_tag_name.end()) {
         if (callback(it->value) == IterationDecision::Break)
-            return;
-    }
-    if (abstract_element.pseudo_element().has_value()) {
-        if (Selector::PseudoElementSelector::is_known_pseudo_element_type(abstract_element.pseudo_element().value())) {
-            if (callback(rules_by_pseudo_element.at(to_underlying(abstract_element.pseudo_element().value()))) == IterationDecision::Break)
-                return;
-        } else {
-            // NOTE: We don't cache rules for unknown pseudo-elements. They can't match anything anyway.
-        }
+            return IterationDecision::Break;
     }
 
     if (abstract_element.element().is_document_element()) {
-        if (callback(root_rules) == IterationDecision::Break)
-            return;
+        if (callback(rule_buckets.root_rules) == IterationDecision::Break)
+            return IterationDecision::Break;
     }
 
     IterationDecision decision = IterationDecision::Continue;
     abstract_element.element().for_each_attribute([&](auto& name, auto&) {
-        if (auto it = rules_by_attribute_name.find(name); it != rules_by_attribute_name.end()) {
+        if (auto it = rule_buckets.rules_by_attribute_name.find(name); it != rule_buckets.rules_by_attribute_name.end())
             decision = callback(it->value);
-        }
     });
     if (decision == IterationDecision::Break)
-        return;
+        return IterationDecision::Break;
 
-    (void)callback(other_rules);
+    static constexpr Array<PseudoClass, 18> subject_pseudo_classes {
+        PseudoClass::Host,
+        PseudoClass::FocusVisible,
+        PseudoClass::Focus,
+        PseudoClass::Active,
+        PseudoClass::Fullscreen,
+        PseudoClass::Target,
+        PseudoClass::Heading,
+        PseudoClass::Checked,
+        PseudoClass::Disabled,
+        PseudoClass::LocalLink,
+        PseudoClass::PlaceholderShown,
+        PseudoClass::Visited,
+        PseudoClass::AnyLink,
+        PseudoClass::Link,
+        PseudoClass::Hover,
+        PseudoClass::FocusWithin,
+        PseudoClass::Enabled,
+        PseudoClass::Unchecked,
+    };
+    for (auto pseudo_class : subject_pseudo_classes) {
+        auto const& rules = rule_buckets.rules_by_subject_pseudo_class[to_underlying(pseudo_class)];
+        if (rules.is_empty())
+            continue;
+        if (!matches_subject_pseudo_class_bucket(pseudo_class, abstract_element.element()))
+            continue;
+        if (callback(rules) == IterationDecision::Break)
+            return IterationDecision::Break;
+    }
+
+    for (auto const& [hash, rules] : rule_buckets.rules_by_ancestor_hash) {
+        if (!may_contain_ancestor_hash(hash))
+            continue;
+        if (callback(rules) == IterationDecision::Break)
+            return IterationDecision::Break;
+    }
+
+    return callback(rule_buckets.other_rules);
+}
+
+void RuleCache::add_rule(MatchingRule const& matching_rule, Optional<PseudoElement> pseudo_element, bool contains_root_pseudo_class, SubjectPseudoClassBuckets subject_pseudo_class_buckets, AncestorHashBuckets ancestor_hash_buckets)
+{
+    if (matching_rule.slotted) {
+        slotted_rules.append(matching_rule);
+        return;
+    }
+    if (matching_rule.contains_part_pseudo_element) {
+        part_rules.append(matching_rule);
+        return;
+    }
+
+    if (matching_rule.contains_pseudo_element && pseudo_element.has_value()) {
+        if (Selector::PseudoElementSelector::is_known_pseudo_element_type(pseudo_element.value())) {
+            // Normalized pseudo-element selectors end with a pseudo-element compound; bucket them
+            // by the originating element compound so `.foo::before` keeps using the `.foo` bucket.
+            auto const& bucket_compound_selector = [&]() -> Selector::CompoundSelector const& {
+                for (auto const& compound_selector : matching_rule.selector.compound_selectors().in_reverse()) {
+                    if (compound_selector.combinator != Selector::Combinator::PseudoElement)
+                        return compound_selector;
+                }
+                return matching_rule.selector.compound_selectors().last();
+            }();
+            if (!contains_root_pseudo_class
+                && !bucket_for_compound_selector(bucket_compound_selector).has_value()
+                && (subject_pseudo_class_buckets == SubjectPseudoClassBuckets::No || !subject_pseudo_class_bucket_for_compound_selector(bucket_compound_selector).has_value())
+                && add_rule_to_multiple_is_or_where_buckets(rules_by_pseudo_element[to_underlying(pseudo_element.value())], matching_rule, bucket_compound_selector, next_multi_bucket_rule_index)) {
+                return;
+            }
+            add_rule_to_rule_buckets(rules_by_pseudo_element[to_underlying(pseudo_element.value())], matching_rule, bucket_compound_selector, contains_root_pseudo_class, subject_pseudo_class_buckets, ancestor_hash_buckets);
+        }
+        return;
+    }
+
+    add_rule_to_rule_buckets(*this, matching_rule, matching_rule.selector.compound_selectors().last(), contains_root_pseudo_class, subject_pseudo_class_buckets, ancestor_hash_buckets);
+}
+
+void RuleCache::for_each_matching_rules(DOM::AbstractElement abstract_element, Function<bool(u32)> const& may_contain_ancestor_hash, Function<IterationDecision(Vector<MatchingRule> const&)> callback) const
+{
+    if (abstract_element.pseudo_element().has_value()) {
+        if (Selector::PseudoElementSelector::is_known_pseudo_element_type(abstract_element.pseudo_element().value())) {
+            (void)for_each_matching_rule_bucket(abstract_element, rules_by_pseudo_element.at(to_underlying(abstract_element.pseudo_element().value())), may_contain_ancestor_hash, callback);
+        } else {
+            // NOTE: We don't cache rules for unknown pseudo-elements. They can't match anything anyway.
+        }
+        return;
+    }
+
+    (void)for_each_matching_rule_bucket(abstract_element, *this, may_contain_ancestor_hash, callback);
+}
+
+void RuleCache::for_each_matching_pseudo_element_rules(DOM::AbstractElement abstract_element, Function<bool(u32)> const& may_contain_ancestor_hash, Function<IterationDecision(Vector<MatchingRule> const&)> callback) const
+{
+    VERIFY(!abstract_element.pseudo_element().has_value());
+    for (auto const& pseudo_element_rules : rules_by_pseudo_element) {
+        if (for_each_matching_rule_bucket(abstract_element, pseudo_element_rules, may_contain_ancestor_hash, callback) == IterationDecision::Break)
+            return;
+    }
 }
 
 void StyleComputer::ScopedMatchingRule::visit_edges(GC::Cell::Visitor& visitor)

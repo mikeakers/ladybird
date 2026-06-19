@@ -1527,12 +1527,7 @@ WebIDL::ExceptionOr<GC::Ref<Node>> Node::clone_node_binding(bool subtree)
     return clone_node(nullptr, subtree);
 }
 
-void Node::set_document(Badge<Document>, Document& document)
-{
-    set_document(document);
-}
-
-void Node::set_document(Badge<NamedNodeMap>, Document& document)
+void Node::set_document(Badge<Document, NamedNodeMap>, Document& document)
 {
     set_document(document);
 }
@@ -1804,13 +1799,29 @@ void Node::inserted()
     set_needs_style_update(true);
 }
 
+void Node::clear_layout_node_paintables()
+{
+    if (!m_layout_node)
+        return;
+
+    m_layout_node->clear_paintables();
+
+    // NB: Block-in-inline splitting can create multiple layout nodes for a single DOM node. Only the last one is stored
+    //     in m_layout_node so we need to clear the paintables for the continued nodes as well
+    auto* node_with_metrics = as_if<Layout::NodeWithStyleAndBoxModelMetrics>(*m_layout_node);
+    if (!node_with_metrics)
+        return;
+
+    for (auto* continuation = node_with_metrics->continuation_of_node(); continuation; continuation = continuation->continuation_of_node())
+        continuation->clear_paintables();
+}
+
 void Node::removed_from(IsSubtreeRoot, Node*, Node&)
 {
     m_is_connected = false;
     m_in_editable_subtree = false;
     m_inside_blocking_wheel_event_handler = false;
-    if (m_layout_node)
-        m_layout_node->clear_paintables();
+    clear_layout_node_paintables();
     m_layout_node = nullptr;
     m_paintable = nullptr;
 

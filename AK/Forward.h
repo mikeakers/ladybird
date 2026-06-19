@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <AK/DefaultDelete.h>
 #include <AK/SinglyLinkedListSizePolicy.h>
 #include <AK/StdLibExtras.h>
 #include <AK/Types.h>
@@ -112,7 +111,7 @@ class HashMap;
 template<typename K, typename V, typename KeyTraits = Traits<K>, typename ValueTraits = Traits<V>>
 using OrderedHashMap = HashMap<K, V, KeyTraits, ValueTraits, true>;
 
-template<typename T>
+template<typename... Ts>
 class Badge;
 
 template<typename T>
@@ -148,7 +147,7 @@ class Optional<FlyString>;
 template<typename T>
 class RefPtr;
 
-template<typename T, typename TDeleter = DefaultDelete<T>>
+template<typename T>
 class OwnPtr;
 
 template<typename T>

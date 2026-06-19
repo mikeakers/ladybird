@@ -7,6 +7,7 @@
 
 #include <AK/JsonObject.h>
 #include <AK/NumericLimits.h>
+#include <LibCore/EventLoop.h>
 #include <LibCore/TimeZone.h>
 #include <LibGfx/Cursor.h>
 #include <LibHTTP/HSTS/ParsedHSTSPolicy.h>
@@ -23,7 +24,6 @@
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/PreferredColorScheme.h>
-#include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/Compositor/AsyncScrollTree.h>
 #include <LibWeb/Compositor/AsyncScrollingState.h>
 #include <LibWeb/DOM/Document.h>
@@ -34,6 +34,8 @@
 #include <LibWeb/Dump.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/Geometry/DOMRect.h>
+#include <LibWeb/HTML/AnimatedBitmapDecodedImageData.h>
+#include <LibWeb/HTML/AutoplaySettings.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/EventLoop/TaskQueue.h>
@@ -42,6 +44,7 @@
 #include <LibWeb/HTML/Navigable.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/SessionHistoryEntry.h>
+#include <LibWeb/HTML/SharedResourceRequest.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Internals/InternalGamepad.h>
@@ -54,6 +57,7 @@
 #include <LibWeb/Painting/DisplayListResourceStorage.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
+#include <LibWeb/WebIDL/ExceptionOr.h>
 #include <LibWeb/WebIDL/Promise.h>
 
 namespace Web::Internals {
@@ -299,6 +303,11 @@ void Internals::commit_text()
     page().handle_keydown(UIEvents::Key_Return, 0, 0x0d, false, true);
 }
 
+void Internals::clobber_next_navigation_with_a_traversal()
+{
+    HTML::Navigable::clobber_next_navigation_with_a_traversal_for_testing();
+}
+
 UIEvents::MouseButton Internals::button_from_unsigned_short(WebIDL::UnsignedShort button)
 {
     switch (button) {
@@ -440,6 +449,17 @@ void Internals::spoof_current_url(String const& url_string)
     HTML::relevant_settings_object(window.associated_document()).creation_url = url.release_value();
 }
 
+void Internals::load_url(String const& url_string)
+{
+    auto url = DOMURL::parse(url_string);
+
+    VERIFY(url.has_value());
+
+    Core::deferred_invoke([page = GC::make_root(page()), url = url.release_value()] {
+        page->load(url);
+    });
+}
+
 GC::Ref<InternalAnimationTimeline> Internals::create_internal_animation_timeline()
 {
     auto& realm = this->realm();
@@ -476,6 +496,16 @@ void Internals::simulate_drop(double x, double y)
 void Internals::expire_cookies_with_time_offset(WebIDL::LongLong seconds)
 {
     page().client().page_did_expire_cookies_with_time_offset(AK::Duration::from_seconds(seconds));
+}
+
+GC::Ref<WebIDL::Promise> Internals::delete_all_cookies()
+{
+    auto& realm = this->realm();
+    auto promise = WebIDL::create_promise(realm);
+    auto const& document = as<HTML::Window>(HTML::relevant_global_object(*this)).associated_document();
+
+    page().client().page_did_delete_all_cookies(document.url(), promise);
+    return promise;
 }
 
 bool Internals::set_http_memory_cache_enabled(bool enabled)
@@ -517,6 +547,12 @@ WebIDL::ExceptionOr<void> Internals::set_content_blockers(String const& patterns
 void Internals::set_content_blocking_enabled(bool enabled)
 {
     page().set_content_blocking_enabled(enabled);
+}
+
+void Internals::set_autoplay_policy(String const& policy)
+{
+    if (auto parsed = HTML::autoplay_policy_from_string(policy); parsed.has_value())
+        HTML::AutoplaySettings::the().set_policy(*parsed, {});
 }
 
 // NOLINTNEXTLINE(readability-convert-member-functions-to-static
@@ -661,12 +697,60 @@ String Internals::dump_session_history()
         auto step = entry->step();
         auto const& url = entry->url();
         auto filename = url.basename();
-        auto display = url.fragment().has_value() ? MUST(String::formatted("{}#{}", filename, *url.fragment())) : MUST(String::from_byte_string(filename));
+        StringBuilder display_builder;
+        display_builder.append(filename);
+        if (url.query().has_value())
+            display_builder.appendff("?{}", *url.query());
+        if (url.fragment().has_value())
+            display_builder.appendff("#{}", *url.fragment());
+        auto display = display_builder.to_string_without_validation();
         auto is_current = step.has<int>() && step.get<int>() == current_step;
         auto relative_step = step.has<int>() && min_step.has_value() ? String::number(step.get<int>() - *min_step) : "pending"_string;
         builder.appendff("  step {} {}{}\n", relative_step, display, is_current ? " (current)"sv : ""sv);
     }
     return builder.to_string_without_validation();
+}
+
+String Internals::dump_ui_process_session_history()
+{
+    auto& document = window().associated_document();
+    if (auto navigable = document.navigable()) {
+        if (auto traversable = navigable->traversable_navigable();
+            traversable && document.page().client().should_report_session_history_updates()) {
+            auto session_history_snapshot = traversable->create_session_history_snapshot();
+            return document.page().client().page_did_update_session_history_and_request_ui_process_session_history_for_testing(
+                session_history_snapshot.top_level_session_history_entries,
+                session_history_snapshot.used_session_history_steps,
+                session_history_snapshot.current_used_step_index);
+        }
+    }
+
+    return document.page().client().page_did_request_ui_process_session_history_for_testing();
+}
+
+GC::Ref<WebIDL::Promise> Internals::flush_session_history_traversal_queue()
+{
+    auto& realm = this->realm();
+    auto promise = WebIDL::create_promise(realm);
+    auto& document = window().associated_document();
+    auto navigable = document.navigable();
+    if (!navigable) {
+        WebIDL::resolve_promise(realm, promise);
+        return promise;
+    }
+
+    auto traversable = navigable->traversable_navigable();
+    if (!traversable) {
+        WebIDL::resolve_promise(realm, promise);
+        return promise;
+    }
+
+    traversable->append_session_history_traversal_steps(GC::create_function(heap(), [&realm, promise](NonnullRefPtr<Core::Promise<Empty>> signal) {
+        HTML::TemporaryExecutionContext execution_context { realm };
+        WebIDL::resolve_promise(realm, promise);
+        signal->resolve({});
+    }));
+    return promise;
 }
 
 GC::Ptr<DOM::ShadowRoot> Internals::get_shadow_root(GC::Ref<DOM::Element> element)
@@ -741,6 +825,7 @@ JS::Object* Internals::get_style_invalidation_counters()
     object->define_direct_property("elementInheritedStyleNoopRecomputations"_utf16_fly_string, JS::Value(counters.element_inherited_style_noop_recomputations), JS::default_attributes);
     object->define_direct_property("previousSiblingInvalidationWalkVisits"_utf16_fly_string, JS::Value(counters.previous_sibling_invalidation_walk_visits), JS::default_attributes);
     object->define_direct_property("descendantSlotInvalidationSubtreeScans"_utf16_fly_string, JS::Value(counters.descendant_slot_invalidation_subtree_scans), JS::default_attributes);
+    object->define_direct_property("mediaRuleEvaluations"_utf16_fly_string, JS::Value(counters.media_rule_evaluations), JS::default_attributes);
     return object;
 }
 
@@ -780,9 +865,38 @@ bool Internals::style_sheet_may_have_has_selectors(CSS::CSSStyleSheet& style_she
     return style_sheet.selector_insights().has_has_selectors;
 }
 
-WebIDL::UnsignedLongLong Internals::active_image_style_value_animation_count()
+WebIDL::ExceptionOr<JS::Object*> Internals::image_animation_state_for_url(String const& url)
 {
-    return CSS::ImageStyleValue::active_animation_timer_count(window().associated_document());
+    auto& document = window().associated_document();
+    auto parsed_url = document.encoding_parse_url(url);
+    if (!parsed_url.has_value())
+        return WebIDL::SimpleException { .type = WebIDL::SimpleExceptionType::TypeError, .message = MUST(String::formatted("Invalid URL: '{}'", url)) };
+
+    auto it = document.shared_resource_requests().find(*parsed_url);
+    if (it == document.shared_resource_requests().end())
+        return WebIDL::SimpleException { .type = WebIDL::SimpleExceptionType::TypeError, .message = MUST(String::formatted("URL doesn't have any associated shared resource requests: '{}'", url)) };
+
+    auto image_data = it->value->image_data();
+
+    if (!image_data)
+        return WebIDL::SimpleException { .type = WebIDL::SimpleExceptionType::TypeError, .message = MUST(String::formatted("URL's shared resource request doesn't have any associated image data: '{}'", url)) };
+
+    auto const* animated_bitmap_data = as_if<HTML::AnimatedBitmapDecodedImageData>(*image_data);
+
+    if (!animated_bitmap_data)
+        return WebIDL::SimpleException { .type = WebIDL::SimpleExceptionType::TypeError, .message = MUST(String::formatted("URL's associated image is not an animated bitmap: '{}'", url)) };
+
+    auto object = JS::Object::create(realm(), nullptr);
+
+    object->define_direct_property("timerActive"_utf16_fly_string, JS::Value(animated_bitmap_data->m_animation_timer->is_active()), JS::default_attributes);
+    object->define_direct_property("sessionID"_utf16_fly_string, JS::Value(static_cast<double>(animated_bitmap_data->m_session_id)), JS::default_attributes);
+    object->define_direct_property("frameIndex"_utf16_fly_string, JS::Value(animated_bitmap_data->m_current_frame_index), JS::default_attributes);
+    object->define_direct_property("frameCount"_utf16_fly_string, JS::Value(animated_bitmap_data->m_frame_count), JS::default_attributes);
+    object->define_direct_property("loopsCompleted"_utf16_fly_string, JS::Value(animated_bitmap_data->m_loops_completed), JS::default_attributes);
+    object->define_direct_property("loopCount"_utf16_fly_string, JS::Value(animated_bitmap_data->m_loop_count), JS::default_attributes);
+    object->define_direct_property("clientCount"_utf16_fly_string, JS::Value(image_data->m_clients.size()), JS::default_attributes);
+
+    return object.ptr();
 }
 
 struct AsyncScrollingStateSnapshot {

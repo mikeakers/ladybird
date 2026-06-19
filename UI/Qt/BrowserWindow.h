@@ -103,6 +103,7 @@ public:
 
     Tab& create_new_tab(Web::HTML::ActivateTab activate_tab);
     Tab* current_tab() const { return m_current_tab; }
+    bool activate_tab_with_url(URL::URL const&);
     FullscreenMode& fullscreen_mode();
 
     QMenu& hamburger_menu() const { return *m_hamburger_menu; }
@@ -153,6 +154,7 @@ private:
     virtual void resizeEvent(QResizeEvent*) override;
     virtual void changeEvent(QEvent* event) override;
     virtual void moveEvent(QMoveEvent*) override;
+    virtual void paintEvent(QPaintEvent*) override;
     virtual void wheelEvent(QWheelEvent*) override;
     virtual void closeEvent(QCloseEvent*) override;
 
@@ -170,6 +172,8 @@ private:
     void update_resize_cursor(QPoint const&);
     void clear_resize_cursor();
     void update_window_corners();
+    bool should_draw_window_border() const;
+    void update_window_border();
 
     template<typename Callback>
     void for_each_tab(Callback&& callback)

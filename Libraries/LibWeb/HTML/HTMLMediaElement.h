@@ -53,7 +53,7 @@ public:
     virtual void adjust_computed_style(CSS::ComputedProperties& style) override;
 
     // NOTE: The function is wrapped in a GC::HeapFunction immediately.
-    void queue_a_media_element_task(Function<void()>);
+    void queue_a_media_element_task(Function<void(HTMLMediaElement&)>);
 
     void cancel_the_fetching_process();
 
@@ -255,6 +255,7 @@ private:
     void update_current_video_frame();
 
     bool is_eligible_for_autoplay() const;
+    bool is_allowed_to_play() const;
 
     enum class PlaybackDirection : u8 {
         Forwards,

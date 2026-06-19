@@ -54,9 +54,7 @@ static bool pending_has_invalidation_covers_all_child_list_mutation_features(Sty
     if (mutation_features.is_conservative)
         return true;
 
-    auto const* data = scope.m_rule_cache ? &scope.m_rule_cache->style_invalidation_data : nullptr;
-    if (!data)
-        return false;
+    auto const& data = scope.style_invalidation_data();
 
     if (!mutation_features.may_affect_sibling_relationships)
         return false;
@@ -69,15 +67,15 @@ static bool pending_has_invalidation_covers_all_child_list_mutation_features(Sty
         return true;
     };
 
-    if (!contains_all_keys(mutation_features.tag_names, data->tag_names_used_in_has_selectors))
+    if (!contains_all_keys(mutation_features.tag_names, data.tag_names_used_in_has_selectors))
         return false;
-    if (!contains_all_keys(mutation_features.ids, data->ids_used_in_has_selectors))
+    if (!contains_all_keys(mutation_features.ids, data.ids_used_in_has_selectors))
         return false;
-    if (!contains_all_keys(mutation_features.class_names, data->class_names_used_in_has_selectors))
+    if (!contains_all_keys(mutation_features.class_names, data.class_names_used_in_has_selectors))
         return false;
-    if (!contains_all_keys(mutation_features.attribute_names, data->attribute_names_used_in_has_selectors))
+    if (!contains_all_keys(mutation_features.attribute_names, data.attribute_names_used_in_has_selectors))
         return false;
-    if (!data->pseudo_classes_used_in_has_selectors.is_empty() && !mutation_features.may_affect_pseudo_classes)
+    if (!data.pseudo_classes_used_in_has_selectors.is_empty() && !mutation_features.may_affect_pseudo_classes)
         return false;
 
     return true;
@@ -85,8 +83,7 @@ static bool pending_has_invalidation_covers_all_child_list_mutation_features(Sty
 
 static bool scope_has_featureless_sensitive_has_selectors(StyleScope const& scope)
 {
-    auto const* data = scope.m_rule_cache ? &scope.m_rule_cache->style_invalidation_data : nullptr;
-    return data && data->has_selectors_sensitive_to_featureless_subtree_changes;
+    return scope.style_invalidation_data().has_selectors_sensitive_to_featureless_subtree_changes;
 }
 
 void invalidate_element_if_affected_by_has(DOM::Element& element, DescendantHasInvalidation descendant_has_invalidation)
@@ -138,6 +135,22 @@ static bool selector_may_match_mutation_features(Selector const& selector, Pendi
         };
 
         for (auto const& compound_selector : selector.compound_selectors()) {
+            bool compound_has_positive_concrete_feature = false;
+            for (auto const& simple_selector : compound_selector.simple_selectors) {
+                switch (simple_selector.type) {
+                case Selector::SimpleSelector::Type::TagName:
+                case Selector::SimpleSelector::Type::Id:
+                case Selector::SimpleSelector::Type::Class:
+                case Selector::SimpleSelector::Type::Attribute:
+                    compound_has_positive_concrete_feature = true;
+                    break;
+                default:
+                    break;
+                }
+                if (compound_has_positive_concrete_feature)
+                    break;
+            }
+
             if ((compound_selector.combinator == Selector::Combinator::NextSibling
                     || compound_selector.combinator == Selector::Combinator::SubsequentSibling)
                 && mutation_features.may_affect_sibling_relationships)
@@ -228,6 +241,15 @@ static bool selector_may_match_mutation_features(Selector const& selector, Pendi
                             || mutation_features.pseudo_classes.contains(pseudo_class.type);
                         break;
                     case PseudoClass::Not:
+                        // A bare negation can match because any unrelated node exists, but a negation
+                        // attached to a positive concrete feature only changes when either side changes.
+                        if (!compound_has_positive_concrete_feature) {
+                            must_be_conservative = true;
+                            break;
+                        }
+                        saw_concrete_feature = true;
+                        concrete_feature_found_in_mutation_subtree |= visit_selector_list(pseudo_class.argument_selector_list);
+                        break;
                     case PseudoClass::Has:
                     default:
                         must_be_conservative = true;
@@ -288,21 +310,29 @@ static bool has_rule_that_may_be_affected_by_mutation(StyleScope& style_scope, D
         }
     };
 
+    auto check_rule_map = [&](auto const& map) {
+        for (auto const& entry : map) {
+            check_rule_vector(entry.value);
+            if (may_be_affected)
+                return;
+        }
+    };
+
+    auto check_rule_buckets = [&](auto const& rule_buckets) {
+        check_rule_map(rule_buckets.rules_by_id);
+        check_rule_map(rule_buckets.rules_by_class);
+        check_rule_map(rule_buckets.rules_by_tag_name);
+        check_rule_map(rule_buckets.rules_by_attribute_name);
+        check_rule_vector(rule_buckets.root_rules);
+        check_rule_vector(rule_buckets.other_rules);
+    };
+
     auto const& has_rule_cache = style_scope.get_pseudo_class_rule_cache(PseudoClass::Has);
-    for (auto const& entry : has_rule_cache.rules_by_id)
-        check_rule_vector(entry.value);
-    for (auto const& entry : has_rule_cache.rules_by_class)
-        check_rule_vector(entry.value);
-    for (auto const& entry : has_rule_cache.rules_by_tag_name)
-        check_rule_vector(entry.value);
-    for (auto const& entry : has_rule_cache.rules_by_attribute_name)
-        check_rule_vector(entry.value);
+    check_rule_buckets(has_rule_cache);
     for (auto const& rules : has_rule_cache.rules_by_pseudo_element)
-        check_rule_vector(rules);
-    check_rule_vector(has_rule_cache.root_rules);
+        check_rule_buckets(rules);
     check_rule_vector(has_rule_cache.slotted_rules);
     check_rule_vector(has_rule_cache.part_rules);
-    check_rule_vector(has_rule_cache.other_rules);
 
     return !found_has_rule || may_be_affected;
 }

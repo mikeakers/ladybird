@@ -32,11 +32,14 @@
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/Navigable.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
+#include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
+#include <LibWeb/HTML/Window.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/InvalidateDisplayList.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/WebIDL/Promise.h>
 #include <LibWebView/SiteIsolation.h>
 #include <LibWebView/ViewImplementation.h>
 #include <WebContent/ConnectionFromClient.h>
@@ -49,9 +52,9 @@
 
 namespace WebContent {
 
-static PageClient::UseSkiaPainter s_use_skia_painter = PageClient::UseSkiaPainter::GPUBackendIfAvailable;
 static bool s_is_headless { false };
 static bool s_async_scrolling_enabled { false };
+static bool s_should_report_session_history_updates_in_test_mode { false };
 
 GC_DEFINE_ALLOCATOR(PageClient);
 
@@ -62,11 +65,6 @@ static String serialize_dom_mutation_target(Web::DOM::Node const& target)
     target.serialize_tree_as_json(serializer);
     MUST(serializer.finish());
     return MUST(builder.to_string());
-}
-
-void PageClient::set_use_skia_painter(UseSkiaPainter use_skia_painter)
-{
-    s_use_skia_painter = use_skia_painter;
 }
 
 bool PageClient::is_headless() const
@@ -82,6 +80,11 @@ void PageClient::set_is_headless(bool is_headless)
 void PageClient::set_async_scrolling_enabled(bool enabled)
 {
     s_async_scrolling_enabled = enabled;
+}
+
+void PageClient::set_should_report_session_history_updates_in_test_mode(bool should_report)
+{
+    s_should_report_session_history_updates_in_test_mode = should_report;
 }
 
 GC::Ref<PageClient> PageClient::create(JS::VM& vm, PageHost& page_host, u64 id)
@@ -110,6 +113,8 @@ void PageClient::visit_edges(JS::Cell::Visitor& visitor)
     Base::visit_edges(visitor);
     visitor.visit(m_page);
     visitor.visit(m_top_level_document_console_client);
+    for (auto& promise : m_pending_delete_all_cookies_promises)
+        visitor.visit(promise.value);
     m_pending_dom_mutations.for_each([&](auto& pending_mutation) {
         visitor.visit(pending_mutation.target);
     });
@@ -139,6 +144,19 @@ void PageClient::set_has_focus(bool has_focus)
     }
 }
 
+void PageClient::set_window_handle(String window_handle)
+{
+    page().top_level_traversable()->set_window_handle(move(window_handle));
+
+    if (m_webdriver)
+        m_webdriver->page_did_set_window_handle({}, page().top_level_traversable()->window_handle());
+}
+
+void PageClient::did_start_webdriver_navigation(URL::URL const& url)
+{
+    client().async_did_start_webdriver_navigation(m_id, url);
+}
+
 void PageClient::setup_palette()
 {
     // FIXME: Get the proper palette from our peer somehow
@@ -161,9 +179,12 @@ bool PageClient::is_url_suitable_for_same_process_navigation(URL::URL const& cur
     return WebView::is_url_suitable_for_same_process_navigation(current_url, target_url);
 }
 
-void PageClient::request_new_process_for_navigation(URL::URL const& url)
+void PageClient::request_new_process_for_navigation(URL::URL const& url, Variant<Empty, String, Web::HTML::POSTResource> document_resource, Web::Bindings::NavigationHistoryBehavior history_handling)
 {
-    client().async_did_request_new_process_for_navigation(m_id, url);
+    if (m_webdriver)
+        m_webdriver->page_did_start_window_replacement({}, page().top_level_traversable()->window_handle());
+
+    client().async_did_request_new_process_for_navigation(m_id, url, move(document_resource), history_handling);
 }
 
 Gfx::Palette PageClient::palette() const
@@ -223,10 +244,16 @@ void PageClient::set_window_size(Web::DevicePixelSize size)
     page().set_window_size(size);
 }
 
+void PageClient::compositor_process_lost()
+{
+    page().notify_all_webgl_contexts_lost();
+}
+
 void PageClient::compositor_process_reconnected()
 {
     page().top_level_traversable()->repaint_after_compositor_process_reconnect();
-    page().republish_all_canvas_element_surfaces();
+    page().notify_all_canvas_elements_of_lost_backing_storage();
+    page().prepare_canvas_contexts_for_compositing();
     page().update_all_media_element_video_sinks();
     Web::HTML::main_thread_event_loop().queue_task_to_update_the_rendering();
 }
@@ -380,9 +407,20 @@ void PageClient::page_did_middle_click_link(URL::URL const& url, ByteString cons
     client().async_did_middle_click_link(m_id, url, target, modifiers);
 }
 
-void PageClient::page_did_start_loading(URL::URL const& url, bool is_redirect)
+void PageClient::page_did_start_loading(URL::URL const& url, Variant<Empty, String, Web::HTML::POSTResource> document_resource, bool is_redirect, Web::Bindings::NavigationHistoryBehavior history_handling)
 {
-    client().async_did_start_loading(m_id, url, is_redirect);
+    if (m_webdriver)
+        m_webdriver->page_did_start_loading({}, url);
+
+    client().async_did_start_loading(m_id, url, move(document_resource), is_redirect, history_handling);
+}
+
+void PageClient::page_did_cancel_loading(URL::URL const& url)
+{
+    if (m_webdriver)
+        m_webdriver->page_did_cancel_loading({}, url);
+
+    client().async_did_cancel_loading(m_id, url);
 }
 
 void PageClient::page_did_create_new_document(Web::DOM::Document& document)
@@ -409,6 +447,22 @@ void PageClient::page_did_change_active_document_in_top_level_browsing_context(W
 void PageClient::page_did_finish_loading(URL::URL const& url)
 {
     client().async_did_finish_loading(m_id, url);
+}
+
+void PageClient::wait_for_webdriver_navigation_completion(Optional<u64> page_load_timeout, Function<void(Web::WebDriver::Response)> on_complete)
+{
+    auto request_id = m_next_webdriver_navigation_completion_request_id++;
+    m_pending_webdriver_navigation_completion_requests.set(request_id, move(on_complete));
+    client().async_did_request_webdriver_navigation_completion(m_id, request_id, page_load_timeout);
+}
+
+void PageClient::did_complete_webdriver_navigation_completion(u64 request_id, Web::WebDriver::Response response)
+{
+    auto maybe_callback = m_pending_webdriver_navigation_completion_requests.take(request_id);
+    if (!maybe_callback.has_value())
+        return;
+
+    maybe_callback.value()(move(response));
 }
 
 void PageClient::page_did_finish_test(String const& text)
@@ -634,6 +688,28 @@ void PageClient::page_did_expire_cookies_with_time_offset(AK::Duration offset)
         document->reset_cookie_version();
 }
 
+void PageClient::page_did_delete_all_cookies(URL::URL const& url, GC::Ref<Web::WebIDL::Promise> promise)
+{
+    auto request_id = m_next_delete_all_cookies_request_id++;
+    m_pending_delete_all_cookies_promises.set(request_id, promise);
+    client().async_did_request_delete_all_cookies(m_id, request_id, url);
+
+    if (auto* document = page().top_level_browsing_context().active_document())
+        document->reset_cookie_version();
+}
+
+void PageClient::did_delete_all_cookies(u64 request_id)
+{
+    auto maybe_promise = m_pending_delete_all_cookies_promises.take(request_id);
+    if (!maybe_promise.has_value())
+        return;
+
+    auto promise = maybe_promise.release_value();
+    auto& realm = promise->promise()->shape().realm();
+    Web::HTML::TemporaryExecutionContext execution_context { realm, Web::HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+    Web::WebIDL::resolve_promise(realm, promise);
+}
+
 void PageClient::page_did_store_hsts_policy(String const& domain, HTTP::HSTS::ParsedHSTSPolicy const& policy)
 {
     client().async_did_store_hsts_policy(domain, policy);
@@ -697,6 +773,11 @@ void PageClient::page_did_clear_storage(Web::StorageAPI::StorageEndpointType sto
     }
 }
 
+void PageClient::page_did_broadcast_storage_change(Web::StorageAPI::StorageEndpointType storage_endpoint, String const& url, Optional<String> const& key, Optional<String> const& old_value, Optional<String> const& new_value)
+{
+    client().async_did_change_storage_item(m_id, storage_endpoint, url, key, old_value, new_value);
+}
+
 void PageClient::page_did_post_broadcast_channel_message(Web::HTML::BroadcastChannelMessage const& message)
 {
     client().async_did_post_broadcast_channel_message(m_id, message);
@@ -731,7 +812,10 @@ void PageClient::page_did_request_activate_tab()
 
 void PageClient::page_did_close_top_level_traversable()
 {
-    page().top_level_traversable()->compositor_context().set_presentation_mode(Empty {});
+    page().top_level_traversable()->compositor_context().stop_presenting_to_client();
+
+    if (m_webdriver)
+        m_webdriver->page_did_close_window({}, page().top_level_traversable()->window_handle());
 
     // FIXME: Rename this IPC call
     client().async_did_close_browsing_context(m_id);
@@ -754,6 +838,71 @@ void PageClient::send_current_needs_beforeunload_check()
 void PageClient::page_did_update_navigation_buttons_state(bool back_enabled, bool forward_enabled)
 {
     client().async_did_update_navigation_buttons_state(m_id, back_enabled, forward_enabled);
+}
+
+bool PageClient::should_report_session_history_updates() const
+{
+    return !Web::HTML::Window::in_test_mode() || s_should_report_session_history_updates_in_test_mode;
+}
+
+void PageClient::page_did_update_session_history(Vector<Web::HTML::SessionHistoryEntryDescriptor> const& entries, Vector<i32> const& used_steps, size_t current_used_step_index)
+{
+    client().async_did_update_session_history(m_id, entries, used_steps, current_used_step_index);
+}
+
+String PageClient::page_did_request_ui_process_session_history_for_testing()
+{
+    return client().did_request_ui_process_session_history_for_testing(m_id);
+}
+
+String PageClient::page_did_update_session_history_and_request_ui_process_session_history_for_testing(Vector<Web::HTML::SessionHistoryEntryDescriptor> const& entries, Vector<i32> const& used_steps, size_t current_used_step_index)
+{
+    return client().did_update_session_history_and_request_ui_process_session_history_for_testing(m_id, entries, used_steps, current_used_step_index);
+}
+
+bool PageClient::page_did_request_traverse_the_history_by_delta(int delta, Web::HistoryTraversalPrecheck history_traversal_precheck)
+{
+    return client().did_request_traverse_the_history_by_delta(m_id, delta, history_traversal_precheck);
+}
+
+void PageClient::request_webdriver_history_traversal(int delta, Function<void(WebDriverHistoryTraversalResult)> on_complete)
+{
+    auto request_id = m_next_webdriver_history_traversal_request_id++;
+    m_pending_webdriver_history_traversal_requests.set(request_id, move(on_complete));
+    client().async_did_request_webdriver_history_traversal(m_id, request_id, delta);
+}
+
+void PageClient::did_complete_webdriver_history_traversal(u64 request_id, bool accepted, bool will_replace_web_content_process, bool will_change_top_level_entry)
+{
+    auto maybe_callback = m_pending_webdriver_history_traversal_requests.take(request_id);
+    if (!maybe_callback.has_value())
+        return;
+
+    maybe_callback.value()(WebDriverHistoryTraversalResult {
+        .accepted = accepted,
+        .will_replace_web_content_process = will_replace_web_content_process,
+        .will_change_top_level_entry = will_change_top_level_entry,
+    });
+}
+
+Web::WebDriver::Response PageClient::request_webdriver_load_url_from_ui(URL::URL const& url)
+{
+    return client().did_request_webdriver_load_url_from_ui(m_id, url);
+}
+
+Web::WebDriver::Response PageClient::request_webdriver_traverse_history_from_ui(int delta)
+{
+    return client().did_request_webdriver_traverse_history_from_ui(m_id, delta);
+}
+
+Web::WebDriver::Response PageClient::request_webdriver_mark_web_content_session_history_stale()
+{
+    return client().did_request_webdriver_mark_web_content_session_history_stale(m_id);
+}
+
+Web::WebDriver::Response PageClient::request_webdriver_session_history()
+{
+    return client().did_request_webdriver_session_history(m_id);
 }
 
 void PageClient::request_file(Web::FileRequest file_request)
@@ -1078,18 +1227,6 @@ Vector<Web::CSS::StyleSheetIdentifier> PageClient::list_style_sheets() const
     });
 
     return results;
-}
-
-Web::DisplayListPlayerType PageClient::display_list_player_type() const
-{
-    switch (s_use_skia_painter) {
-    case UseSkiaPainter::GPUBackendIfAvailable:
-        return Web::DisplayListPlayerType::SkiaGPUIfAvailable;
-    case UseSkiaPainter::CPUBackend:
-        return Web::DisplayListPlayerType::SkiaCPU;
-    default:
-        VERIFY_NOT_REACHED();
-    }
 }
 
 void PageClient::ensure_compositor_host()

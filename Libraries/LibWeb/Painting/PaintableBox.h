@@ -13,7 +13,6 @@
 #include <LibGfx/Forward.h>
 #include <LibWeb/CSS/StyleValues/GridTrackSizeListStyleValue.h>
 #include <LibWeb/Forward.h>
-#include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/FlexLayoutData.h>
 #include <LibWeb/Layout/GridLayoutData.h>
 #include <LibWeb/Painting/AccumulatedVisualContext.h>
@@ -152,11 +151,7 @@ public:
 
     [[nodiscard]] bool has_css_transform() const
     {
-        auto const& computed_values = this->computed_values();
-        return !computed_values.transformations().is_empty()
-            || computed_values.rotate()
-            || computed_values.translate()
-            || computed_values.scale();
+        return layout_node().has_css_transform();
     }
 
     [[nodiscard]] bool has_non_invertible_css_transform() const { return m_has_non_invertible_css_transform; }
@@ -305,7 +300,7 @@ public:
 
     Optional<CSSPixelPoint> transform_point_to_local(CSSPixelPoint screen_position) const;
     Optional<CSSPixelPoint> transform_point_to_local_for_descendants(CSSPixelPoint screen_position) const;
-    CSSPixelRect transform_rect_to_viewport(CSSPixelRect const& rect) const;
+    CSSPixelRect transform_rect_to_viewport(CSSPixelRect const& rect, AccumulatedVisualContextTree::IncludeVisualViewportTransform = AccumulatedVisualContextTree::IncludeVisualViewportTransform::Yes) const;
     CSSPixelPoint inverse_transform_point(CSSPixelPoint screen_position) const;
 
     static constexpr size_t paint_phase_count = to_underlying(PaintPhase::Overlay) + 1;

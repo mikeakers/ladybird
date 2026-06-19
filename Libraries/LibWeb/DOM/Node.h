@@ -154,6 +154,10 @@ public:
     virtual bool is_svg_a_element() const { return false; }
     virtual bool is_svg_g_element() const { return false; }
     virtual bool is_svg_foreign_object_element() const { return false; }
+    virtual bool is_svg_gradient_element() const { return false; }
+    virtual bool is_svg_pattern_element() const { return false; }
+    virtual bool is_svg_clip_path_element() const { return false; }
+    virtual bool is_svg_text_content_element() const { return false; }
 
     bool in_a_document_tree() const;
 
@@ -378,8 +382,7 @@ public:
     CSS::StyleScope const& style_scope() const { return const_cast<Node*>(this)->style_scope(); }
     void for_each_style_scope_which_may_observe_the_node(Function<void(CSS::StyleScope&)> const&);
 
-    void set_document(Badge<Document>, Document&);
-    void set_document(Badge<NamedNodeMap>, Document&);
+    void set_document(Badge<Document, NamedNodeMap>, Document&);
 
     virtual EventTarget* get_parent(Event const&) override;
 
@@ -539,6 +542,7 @@ private:
     void insert_before_impl(GC::Ref<Node>, GC::Ptr<Node> child);
     void append_child_impl(GC::Ref<Node>);
     void remove_child_impl(GC::Ref<Node>);
+    void clear_layout_node_paintables();
 
     static Optional<StringView> first_valid_id(StringView, Document const&);
 
