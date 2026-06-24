@@ -10,6 +10,7 @@
 #include <AK/Array.h>
 #include <AK/GenericShorthands.h>
 #include <AK/StdLibExtras.h>
+#include <AK/Utf16StringBuilder.h>
 #include <LibGfx/Font/Font.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/ComputedValues.h>
@@ -828,10 +829,10 @@ CSSPixelRect PaintableBox::overflow_clip_edge_rect() const
     //     The specified offset dictates how much the overflow clip edge is expanded from the specified box edge
     //     Negative values are invalid. Defaults to zero if omitted.
     overflow_clip_edge.inflate(
-        overflow_clip_margin.top.offset.absolute_length_to_px(),
-        overflow_clip_margin.right.offset.absolute_length_to_px(),
-        overflow_clip_margin.bottom.offset.absolute_length_to_px(),
-        overflow_clip_margin.left.offset.absolute_length_to_px());
+        overflow_clip_margin.top.offset,
+        overflow_clip_margin.right.offset,
+        overflow_clip_margin.bottom.offset,
+        overflow_clip_margin.left.offset);
     return overflow_clip_edge;
 }
 
@@ -1371,10 +1372,10 @@ void PaintableBox::paint_inspector_overlay_internal(DisplayListRecordingContext&
 
     auto font = Platform::FontPlugin::the().default_font(12);
 
-    StringBuilder builder(StringBuilder::Mode::UTF16);
-    builder.append(debug_description());
+    Utf16StringBuilder builder;
+    builder.appendff("{}", debug_description());
     builder.appendff(" {}x{} @ {},{}", border_rect.width(), border_rect.height(), border_rect.x(), border_rect.y());
-    auto size_text = builder.to_utf16_string();
+    auto size_text = builder.to_string();
     auto size_text_rect = border_rect;
     size_text_rect.set_y(border_rect.y() + border_rect.height());
     size_text_rect.set_top(size_text_rect.top());
@@ -1716,7 +1717,7 @@ void PaintableBox::paint_box_shadow(DisplayListRecordingContext& context) const
     Vector<Painting::ShadowData> resolved_box_shadow_data;
     resolved_box_shadow_data.ensure_capacity(box_shadow_layers.size());
     for (auto const& layer : box_shadow_layers)
-        resolved_box_shadow_data.unchecked_append(ShadowData::from_css(layer, layout_node()));
+        resolved_box_shadow_data.unchecked_append(ShadowData::from_css(layer));
     auto borders_data = BordersData {
         .top = computed_values().border_top(),
         .right = computed_values().border_right(),
@@ -1951,7 +1952,7 @@ BorderRadiiData PaintableBox::border_radii_data() const
     auto border_top_right_radius = m_fragment_top_edge_away || m_fragment_right_edge_away ? CSS::BorderRadiusData {} : computed_values.border_top_right_radius();
     auto border_bottom_right_radius = m_fragment_bottom_edge_away || m_fragment_right_edge_away ? CSS::BorderRadiusData {} : computed_values.border_bottom_right_radius();
     auto border_bottom_left_radius = m_fragment_bottom_edge_away || m_fragment_left_edge_away ? CSS::BorderRadiusData {} : computed_values.border_bottom_left_radius();
-    return normalize_border_radii_data(layout_node(), border_rect, border_rect,
+    return normalize_border_radii_data(border_rect, border_rect,
         border_top_left_radius, border_top_right_radius,
         border_bottom_right_radius, border_bottom_left_radius);
 }
@@ -1964,7 +1965,7 @@ Optional<BordersData> PaintableBox::outline_data() const
 
 CSSPixels PaintableBox::outline_offset() const
 {
-    return computed_values().outline_offset().to_px(layout_node());
+    return computed_values().outline_offset();
 }
 
 ScrollFrameIndex PaintableBox::nearest_scroll_frame_index() const

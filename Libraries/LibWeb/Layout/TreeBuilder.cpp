@@ -447,7 +447,9 @@ void TreeBuilder::create_first_letter_wrapper_if_needed(DOM::Element& element, B
         first_letter_slice = make_ref_counted<GeneratedTextNode>(document, Utf16String::from_utf16(text.utf16_view().substring_view(0, letter_end)));
     }
 
-    auto first_letter_wrapper = make_ref_counted<InlineNode>(document, nullptr, *first_letter_style);
+    auto first_letter_wrapper = DOM::Element::create_layout_node_for_display_type(document, first_letter_style->display(), *first_letter_style, nullptr);
+    if (!first_letter_wrapper)
+        return;
     first_letter_wrapper->set_generated_for(CSS::PseudoElement::FirstLetter, element);
     first_letter_wrapper->set_children_are_inline(true);
     first_letter_wrapper->append_child(*first_letter_slice);
@@ -514,7 +516,6 @@ RefPtr<NodeWithStyle> TreeBuilder::create_pseudo_element_if_needed(DOM::Element&
                 element,
                 *pseudo_element_style);
             list_box->set_marker(list_item_marker);
-            element.set_computed_properties(CSS::PseudoElement::Marker, pseudo_element_style);
             element.set_synthetic_pseudo_element_node({}, CSS::PseudoElement::Marker, list_item_marker);
             list_box->prepend_child(*list_item_marker);
             return list_item_marker;
@@ -877,7 +878,7 @@ void TreeBuilder::update_layout_tree(DOM::Node& dom_node, TreeBuilder::Context& 
     }
 
     auto& style_computer = document.style_computer();
-    RefPtr<CSS::ComputedProperties> style;
+    RefPtr<CSS::ComputedProperties const> style;
     CSS::Display display;
 
     if (!should_create_layout_node) {

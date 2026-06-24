@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWebView/Application.h>
 #include <UI/Qt/Icon.h>
 #include <UI/Qt/Menu.h>
 #include <UI/Qt/StringUtils.h>
@@ -65,7 +66,10 @@ public:
         switch (action.id()) {
         case WebView::ActionID::ToggleVerticalTabsExpanded:
             if (auto* parent = as_if<QWidget>(m_action->parent())) {
-                auto icon = action.engaged() ? ChromeIcon::VerticalTabBarCollapse : ChromeIcon::VerticalTabBarExpand;
+                auto const& tab_settings = WebView::Application::settings().tab_settings();
+                auto icon = tab_settings.vertical_tabs_position == WebView::VerticalTabsPosition::Right
+                    ? (action.engaged() ? ChromeIcon::VerticalTabBarCollapseRight : ChromeIcon::VerticalTabBarExpandRight)
+                    : (action.engaged() ? ChromeIcon::VerticalTabBarCollapse : ChromeIcon::VerticalTabBarExpand);
                 m_action->setIcon(create_chrome_icon(icon, parent->palette()));
             }
             break;
@@ -148,12 +152,12 @@ static void initialize_native_control(WebView::Action& action, QAction& qaction,
     case WebView::ActionID::NavigateBack:
         if (include_action_icon == IncludeActionIcon::Yes)
             qaction.setIcon(create_chrome_icon(ChromeIcon::Back, palette));
-        qaction.setShortcut(QKeySequence::StandardKey::Back);
+        qaction.setShortcuts(QKeySequence::keyBindings(QKeySequence::StandardKey::Back));
         break;
     case WebView::ActionID::NavigateForward:
         if (include_action_icon == IncludeActionIcon::Yes)
             qaction.setIcon(create_chrome_icon(ChromeIcon::Forward, palette));
-        qaction.setShortcut(QKeySequence::StandardKey::Forward);
+        qaction.setShortcuts(QKeySequence::keyBindings(QKeySequence::StandardKey::Forward));
         break;
     case WebView::ActionID::Reload:
         if (include_action_icon == IncludeActionIcon::Yes)

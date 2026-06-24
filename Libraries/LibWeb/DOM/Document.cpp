@@ -30,6 +30,7 @@
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibJS/Runtime/NativeFunction.h>
+#include <LibJS/SourceCode.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibURL/Origin.h>
 #include <LibURL/Parser.h>
@@ -6159,10 +6160,10 @@ static CSSPixelRect compute_intersection(GC::Ref<Element> target, CSSPixelRect t
                 auto const& layout_node = container->layout_node_with_style_and_box_metrics();
                 if (layout_node.is_scroll_container() && !scroll_margin.is_empty()) {
                     clip_rect.inflate(
-                        scroll_margin[0].to_px(layout_node, clip_rect.height()),
-                        scroll_margin[1].to_px(layout_node, clip_rect.width()),
-                        scroll_margin[2].to_px(layout_node, clip_rect.height()),
-                        scroll_margin[3].to_px(layout_node, clip_rect.width()));
+                        scroll_margin[0].to_px(clip_rect.height()),
+                        scroll_margin[1].to_px(clip_rect.width()),
+                        scroll_margin[2].to_px(clip_rect.height()),
+                        scroll_margin[3].to_px(clip_rect.width()));
                 }
 
                 intersection_rect.intersect(clip_rect);
@@ -8204,7 +8205,7 @@ GC::Ref<WebIDL::Promise> Document::exit_fullscreen()
     // 2. If doc is not fully active or doc’s fullscreen element is null, then reject promise with a TypeError exception
     //    and return promise.
     if (!is_fully_active() || !fullscreen_element()) {
-        WebIDL::reject_promise(realm, promise, JS::TypeError::create(realm, "Document not fully active or no fullscreen element."sv));
+        WebIDL::reject_promise(realm, promise, JS::TypeError::create(realm, "Document not fully active or no fullscreen element."_utf16));
         return promise;
     }
 

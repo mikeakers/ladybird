@@ -13,6 +13,7 @@
 #include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyNameAndID.h>
 #include <LibWeb/CSS/StyleComputer.h>
@@ -142,7 +143,7 @@ size_t CSSStyleProperties::length() const
     return m_properties.size() + m_custom_properties.size();
 }
 
-String CSSStyleProperties::item(size_t index) const
+Utf16String CSSStyleProperties::item(size_t index) const
 {
     // The item(index) method must return the property name of the CSS declaration at position index.
     // If there is no indexth object in the collection, then the method must return the empty string.
@@ -153,13 +154,13 @@ String CSSStyleProperties::item(size_t index) const
 
     if (is_computed()) {
         auto property_id = static_cast<PropertyID>(index + to_underlying(first_longhand_property_id));
-        return string_from_property_id(property_id).to_string();
+        return Utf16String::from_utf8(string_from_property_id(property_id));
     }
 
     if (index < custom_properties_count)
-        return m_custom_properties.keys()[index].to_utf16_string().to_utf8_but_should_be_ported_to_utf16();
+        return m_custom_properties.keys()[index].to_utf16_string();
 
-    return CSS::string_from_property_id(m_properties[index - custom_properties_count].property_id).to_string();
+    return Utf16String::from_utf8(CSS::string_from_property_id(m_properties[index - custom_properties_count].property_id));
 }
 
 Optional<StyleProperty> CSSStyleProperties::get_property(PropertyID property_id) const
@@ -288,6 +289,11 @@ WebIDL::ExceptionOr<void> CSSStyleProperties::set_property(PropertyID property_i
     return set_property_internal(PropertyNameAndID::from_id(property_id), css_text, priority);
 }
 
+static NonnullRefPtr<StyleValue const> style_value_for_css_pixels(CSSPixels css_pixels)
+{
+    return LengthStyleValue::create(Length::make_px(css_pixels));
+}
+
 static NonnullRefPtr<StyleValue const> style_value_for_length_percentage(LengthPercentage const& length_percentage)
 {
     if (length_percentage.is_percentage())
@@ -341,10 +347,10 @@ static RefPtr<StyleValue const> style_value_for_shadow(ShadowStyleValue::ShadowT
         return ShadowStyleValue::create(
             shadow_type,
             ColorStyleValue::create_from_color(shadow.color, ColorSyntax::Modern),
-            style_value_for_length_percentage(shadow.offset_x),
-            style_value_for_length_percentage(shadow.offset_y),
-            style_value_for_length_percentage(shadow.blur_radius),
-            style_value_for_length_percentage(shadow.spread_distance),
+            style_value_for_css_pixels(shadow.offset_x),
+            style_value_for_css_pixels(shadow.offset_y),
+            style_value_for_css_pixels(shadow.blur_radius),
+            style_value_for_css_pixels(shadow.spread_distance),
             shadow.placement);
     };
 
