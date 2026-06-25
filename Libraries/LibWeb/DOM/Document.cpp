@@ -1667,18 +1667,6 @@ static void relayout_svg_root(Layout::SVGSVGBox& svg_root)
     if (auto paintable = svg_root.paintable_box())
         layout_state.populate_from_paintable(svg_root, *paintable);
 
-    // Pre-populate SVGGraphicsBox ancestors for get_parent_svg_transform().
-    for (auto* ancestor = svg_root.parent(); ancestor; ancestor = ancestor->parent()) {
-        if (auto const* svg_graphics_ancestor = as_if<Layout::SVGGraphicsBox>(*ancestor)) {
-            if (auto paintable = svg_graphics_ancestor->paintable_box())
-                layout_state.populate_from_paintable(*svg_graphics_ancestor, *paintable);
-        }
-        if (auto const* svg_svg_ancestor = as_if<Layout::SVGSVGBox>(*ancestor)) {
-            if (auto paintable = svg_svg_ancestor->paintable_box())
-                layout_state.populate_from_paintable(*svg_svg_ancestor, *paintable);
-        }
-    }
-
     // Pre-populate the viewport for position:fixed elements inside <foreignObject>.
     auto& viewport = svg_root.root();
     if (auto paintable = viewport.paintable_box())
@@ -5447,8 +5435,11 @@ void Document::destroy()
 
     // Not in the spec:
     for (auto& navigable_container : HTML::NavigableContainer::all_instances()) {
-        if (&navigable_container->document() == this && navigable_container->content_navigable())
-            navigable_container->content_navigable()->remove_from_all_navigables();
+        if (&navigable_container->document() == this && navigable_container->content_navigable()) {
+            auto& child_navigable = *navigable_container->content_navigable();
+            child_navigable.set_has_been_destroyed();
+            child_navigable.remove_from_all_navigables();
+        }
     }
 
     // 9. Set document's node navigable's active session history entry's document state's document to null.
@@ -5952,8 +5943,11 @@ void Document::make_active()
     // 2. Set document's browsing context's WindowProxy's [[Window]] internal slot value to window.
     m_browsing_context->window_proxy()->set_window(window);
 
-    if (m_browsing_context->is_top_level()) {
+    auto current_navigable = this->navigable();
+    if (current_navigable && current_navigable->is_top_level_traversable()) {
         page().client().page_did_change_active_document_in_top_level_browsing_context(*this);
+    } else if (current_navigable) {
+        page().client().page_did_commit_child_frame_navigation(current_navigable->id(), url());
     }
 
     // 3. Set window's relevant settings object's execution ready flag.
@@ -9290,11 +9284,8 @@ Optional<CSS::CustomPropertyRegistration const&> Document::get_registered_custom
 NonnullRefPtr<CSS::StyleValue const> Document::custom_property_initial_value(Utf16FlyString const& name) const
 {
     auto maybe_custom_property = get_registered_custom_property(name);
-    if (maybe_custom_property.has_value()) {
-        if (maybe_custom_property->initial_value)
-            return *maybe_custom_property->initial_value;
-        return CSS::GuaranteedInvalidStyleValue::create();
-    }
+    if (maybe_custom_property.has_value())
+        return CSS::compute_registered_custom_property_initial_value(*this, maybe_custom_property.value());
 
     // For non-registered properties, the initial value is the guaranteed-invalid value.
     // See: https://drafts.csswg.org/css-variables/#propdef-
@@ -9308,7 +9299,7 @@ void Document::did_change_custom_property_registrations()
     // Custom property registration changes can alter inheritance and initial values even when no selector matching
     // changes. Registrations only move when a stylesheet containing an @property rule is added/removed or when
     // CSS.registerProperty() is called, so a full document restyle is cheap enough in practice.
-    invalidate_style(DOM::StyleInvalidationReason::Other);
+    invalidate_style(DOM::StyleInvalidationReason::CustomPropertyRegistrationChange);
 }
 
 void Document::build_registered_properties_cache()
