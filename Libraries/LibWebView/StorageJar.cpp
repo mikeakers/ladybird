@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Array.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/StdLibExtras.h>
 #include <LibDatabase/Database.h>
@@ -14,54 +15,39 @@ namespace WebView {
 // Quota size is specified in https://storage.spec.whatwg.org/#registered-storage-endpoints
 static constexpr size_t LOCAL_STORAGE_QUOTA = 5 * MiB;
 
-// Increment this version when needing to alter the WebStorage schema.
-static constexpr u32 WEB_STORAGE_VERSION = 2u;
+static constexpr u32 WEB_STORAGE_SCHEMA_BASELINE_VERSION = 1u;
 
-static constexpr u32 WEB_STORAGE_METADATA_KEY = 12389u;
+ErrorOr<Database::MigrationOutcome> StorageJar::migrate_schema(Database::Database& database, Database::MigrationMode mode)
+{
+    Array<Database::Migration, 1> migrations { {
+        { .version = WEB_STORAGE_SCHEMA_BASELINE_VERSION, .sql = R"#(
+            CREATE TABLE IF NOT EXISTS WebStorage (
+                storage_endpoint INTEGER,
+                storage_key TEXT,
+                bottle_key TEXT,
+                bottle_value TEXT,
+                last_access_time INTEGER,
+                PRIMARY KEY(storage_endpoint, storage_key, bottle_key)
+            );
+        )#"sv },
+    } };
+
+    return database.migrate("WebStorage"sv, migrations, mode);
+}
 
 ErrorOr<NonnullOwnPtr<StorageJar>> StorageJar::create(Database::Database& database)
 {
     Statements statements {};
 
-    auto create_metadata_table = TRY(database.prepare_statement(R"#(
-        CREATE TABLE IF NOT EXISTS WebStorageMetadata (
-            metadata_key INTEGER,
-            version INTEGER,
-            PRIMARY KEY(metadata_key)
-        );
-    )#"sv));
-    database.execute_statement(create_metadata_table, {});
-
-    auto create_storage_table = TRY(database.prepare_statement(R"#(
-        CREATE TABLE IF NOT EXISTS WebStorage (
-            storage_endpoint INTEGER,
-            storage_key TEXT,
-            bottle_key TEXT,
-            bottle_value TEXT,
-            PRIMARY KEY(storage_endpoint, storage_key, bottle_key)
-        );
-    )#"sv));
-    database.execute_statement(create_storage_table, {});
-
-    auto read_storage_version = TRY(database.prepare_statement("SELECT version FROM WebStorageMetadata WHERE metadata_key = ?;"sv));
-    auto storage_version = 0u;
-
-    database.execute_statement(
-        read_storage_version,
-        [&](auto statement_id) { storage_version = database.result_column<u32>(statement_id, 0); },
-        WEB_STORAGE_METADATA_KEY);
-
-    if (storage_version != WEB_STORAGE_VERSION)
-        TRY(upgrade_database(database, storage_version));
-
     statements.get_item = TRY(database.prepare_statement("SELECT bottle_value FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ? AND bottle_key = ?;"sv));
-    statements.set_item = TRY(database.prepare_statement("INSERT OR REPLACE INTO WebStorage VALUES (?, ?, ?, ?, ?);"sv));
+    statements.set_item = TRY(database.prepare_statement("INSERT OR REPLACE INTO WebStorage (storage_endpoint, storage_key, bottle_key, bottle_value, last_access_time) VALUES (?, ?, ?, ?, ?);"sv));
     statements.delete_item = TRY(database.prepare_statement("DELETE FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ? AND bottle_key = ?;"sv));
     statements.delete_items_accessed_since = TRY(database.prepare_statement("DELETE FROM WebStorage WHERE last_access_time >= ?;"sv));
     statements.update_last_access_time = TRY(database.prepare_statement("UPDATE WebStorage SET last_access_time = ? WHERE storage_endpoint = ? AND storage_key = ? AND bottle_key = ?;"sv));
     statements.clear = TRY(database.prepare_statement("DELETE FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ?;"sv));
     statements.get_keys = TRY(database.prepare_statement("SELECT bottle_key FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ?;"sv));
-    statements.calculate_size_excluding_key = TRY(database.prepare_statement("SELECT SUM(OCTET_LENGTH(bottle_key) + OCTET_LENGTH(bottle_value)) FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ? AND bottle_key != ?;"sv));
+    statements.calculate_size_excluding_bottle_key = TRY(database.prepare_statement("SELECT SUM(OCTET_LENGTH(bottle_key) + OCTET_LENGTH(bottle_value)) FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ? AND bottle_key != ?;"sv));
+    statements.calculate_size = TRY(database.prepare_statement("SELECT COALESCE(SUM(OCTET_LENGTH(bottle_key) + OCTET_LENGTH(bottle_value)), 0) FROM WebStorage WHERE storage_key = ?;"sv));
     statements.estimate_storage_size_accessed_since = TRY(database.prepare_statement("SELECT SUM(OCTET_LENGTH(storage_key)) + SUM(OCTET_LENGTH(bottle_key)) + SUM(OCTET_LENGTH(bottle_value)) FROM WebStorage WHERE last_access_time >= ?;"sv));
 
     return adopt_own(*new StorageJar { PersistedStorage { database, statements } });
@@ -78,25 +64,6 @@ StorageJar::StorageJar(Optional<PersistedStorage> persisted_storage)
 }
 
 StorageJar::~StorageJar() = default;
-
-ErrorOr<void> StorageJar::upgrade_database(Database::Database& database, u32 current_version)
-{
-    // Track the version numbers for each schema change:
-    static constexpr u32 VERSION_ADDED_LAST_ACCESS_TIME = 2u;
-
-    if (current_version < VERSION_ADDED_LAST_ACCESS_TIME) {
-        auto add_last_access_time = TRY(database.prepare_statement("ALTER TABLE WebStorage ADD COLUMN last_access_time INTEGER;"sv));
-        database.execute_statement(add_last_access_time, {});
-
-        auto set_last_access_time = TRY(database.prepare_statement("UPDATE WebStorage SET last_access_time = ?;"sv));
-        database.execute_statement(set_last_access_time, {}, UnixDateTime::now());
-    }
-
-    auto set_storage_version = TRY(database.prepare_statement("INSERT OR REPLACE INTO WebStorageMetadata VALUES (?, ?);"sv));
-    database.execute_statement(set_storage_version, {}, WEB_STORAGE_METADATA_KEY, WEB_STORAGE_VERSION);
-
-    return {};
-}
 
 Optional<String> StorageJar::get_item(StorageEndpointType storage_endpoint, String const& storage_key, String const& bottle_key)
 {
@@ -147,6 +114,13 @@ Vector<String> StorageJar::get_all_keys(StorageEndpointType storage_endpoint, St
     if (m_persisted_storage.has_value())
         return m_persisted_storage->get_keys(storage_endpoint, storage_key);
     return m_transient_storage.get_keys(storage_endpoint, storage_key);
+}
+
+u64 StorageJar::usage(String const& storage_key)
+{
+    if (m_persisted_storage.has_value())
+        return m_persisted_storage->usage(storage_key);
+    return m_transient_storage.usage(storage_key);
 }
 
 Requests::CacheSizes StorageJar::estimate_storage_size_accessed_since(UnixDateTime since) const
@@ -270,7 +244,7 @@ StorageSetResult StorageJar::PersistedStorage::set_item(StorageLocation const& k
 
     size_t current_size = 0;
     database.execute_statement(
-        statements.calculate_size_excluding_key,
+        statements.calculate_size_excluding_bottle_key,
         [&](auto statement_id) {
             current_size = database.result_column<int>(statement_id, 0);
         },
@@ -333,6 +307,18 @@ Vector<String> StorageJar::PersistedStorage::get_keys(StorageEndpointType storag
     return keys;
 }
 
+u64 StorageJar::PersistedStorage::usage(String const& storage_key)
+{
+    u64 current_size_in_bytes = 0;
+    database.execute_statement(
+        statements.calculate_size,
+        [&](auto statement_id) {
+            current_size_in_bytes = database.result_column<u64>(statement_id, 0);
+        },
+        storage_key);
+    return current_size_in_bytes;
+}
+
 Requests::CacheSizes StorageJar::PersistedStorage::estimate_storage_size_accessed_since(UnixDateTime since) const
 {
     Requests::CacheSizes sizes;
@@ -348,6 +334,18 @@ Requests::CacheSizes StorageJar::PersistedStorage::estimate_storage_size_accesse
         UnixDateTime::earliest());
 
     return sizes;
+}
+
+u64 StorageJar::TransientStorage::usage(String const& storage_key)
+{
+    u64 current_size_in_bytes = 0;
+    for (auto const& [key, entry] : m_storage_items) {
+        if (key.storage_key == storage_key) {
+            current_size_in_bytes += key.bottle_key.bytes().size();
+            current_size_in_bytes += entry.value.bytes().size();
+        }
+    }
+    return current_size_in_bytes;
 }
 
 }

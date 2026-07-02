@@ -59,6 +59,7 @@ private:
     virtual RefPtr<Layout::Node> create_layout_node(CSS::ComputedProperties const&) override;
 
     void process_the_url(Optional<String> const& href);
+    Optional<String> href_value() const;
 
     static Optional<FlyString> parse_id_from_href(StringView);
 
@@ -74,8 +75,8 @@ private:
     void register_for_referenced_element_changes();
     void unregister_for_referenced_element_changes();
 
-    Optional<float> m_x;
-    Optional<float> m_y;
+    Optional<NumberPercentage> m_x;
+    Optional<NumberPercentage> m_y;
     bool m_needs_document_complete_reclone { false };
 
     Optional<URL::URL> m_href;

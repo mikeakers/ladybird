@@ -10,6 +10,7 @@
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/BorderRadiusStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CursorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CustomIdentStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageSetStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
@@ -30,7 +31,7 @@
 #include <LibWeb/Dump.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLHtmlElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/Layout/BlockContainer.h>
 #include <LibWeb/Layout/FormattingContext.h>
 #include <LibWeb/Layout/ImageBox.h>
@@ -543,7 +544,7 @@ bool Node::establishes_stacking_context() const
     return computed_values.opacity() < 1.0f || will_change_property(CSS::PropertyID::Opacity);
 }
 
-GC::Ptr<HTML::Navigable> Node::navigable() const
+GC::Ptr<HTML::LocalNavigable> Node::navigable() const
 {
     return document().navigable();
 }
@@ -689,6 +690,10 @@ void NodeWithStyle::rebuild_image_observers()
     add_observer_for(m_list_style_image.ptr(), new_observers);
     for (auto const& layer : computed_values().mask_layers())
         add_observer_for(layer.background_image.ptr(), new_observers);
+    for (auto const& cursor : computed_values().cursor()) {
+        if (auto const* cursor_style_value = cursor.get_pointer<NonnullRefPtr<CSS::CursorStyleValue const>>())
+            add_observer_for(&(*cursor_style_value)->image(), new_observers);
+    }
     // TODO: Observe border-image and other <image> accepting properties once we support them.
 
     m_image_observers = move(new_observers);
@@ -817,7 +822,12 @@ void NodeWithStyle::apply_style(CSS::ComputedProperties const& computed_style)
     computed_values.set_overflow_x(computed_style.overflow_x());
     computed_values.set_overflow_y(computed_style.overflow_y());
     computed_values.set_content_visibility(computed_style.content_visibility());
-    computed_values.set_cursor(computed_style.cursor());
+    auto cursor = computed_style.cursor();
+    for (auto const& cursor_data : cursor) {
+        if (auto const* cursor_style_value = cursor_data.get_pointer<NonnullRefPtr<CSS::CursorStyleValue const>>())
+            const_cast<CSS::AbstractImageStyleValue&>((*cursor_style_value)->image()).load_any_resources(*this);
+    }
+    computed_values.set_cursor(move(cursor));
     computed_values.set_image_rendering(computed_style.image_rendering());
     computed_values.set_pointer_events(computed_style.pointer_events());
     computed_values.set_text_decoration_line(computed_style.text_decoration_line());
@@ -1079,6 +1089,7 @@ void NodeWithStyle::apply_style(CSS::ComputedProperties const& computed_style)
 
     computed_values.set_caret_color(computed_style.caret_color(*this));
     computed_values.set_color_interpolation(computed_style.color_interpolation());
+    computed_values.set_color_interpolation_filters(computed_style.color_interpolation_filters());
     computed_values.set_resize(computed_style.resize());
 
     propagate_style_to_anonymous_wrappers();

@@ -811,6 +811,8 @@ class ImageBitmap;
 class ImageData;
 class ImageRequest;
 class ListOfAvailableImages;
+class LocalNavigable;
+class LocalTraversableNavigable;
 class Location;
 class MediaError;
 class MessageChannel;
@@ -860,7 +862,6 @@ class ToggleEvent;
 class TrackEvent;
 class TransferDataDecoder;
 class TransferDataEncoder;
-class TraversableNavigable;
 class UserActivation;
 class ValidityState;
 class VideoTrack;
@@ -987,6 +988,7 @@ struct LayoutState;
 
 namespace Web::MathML {
 
+class MathMLAnchorElement;
 class MathMLElement;
 class MathMLMiElement;
 class MathMLMspaceElement;
@@ -1041,7 +1043,6 @@ class PaintableBox;
 class PaintableWithLines;
 class ScrollStateSnapshot;
 class StackingContext;
-class TextPaintable;
 class VideoPaintable;
 class ViewportPaintable;
 

@@ -46,7 +46,7 @@ struct NamedPropertyID {
     {
     }
     NamedPropertyID(CSS::PropertyID property_id, Vector<FlyString> supported_elements = {})
-        : NamedPropertyID(property_id, CSS::string_from_property_id(property_id), move(supported_elements))
+        : NamedPropertyID(property_id, CSS::string_from_property_id(property_id).to_utf16_string().to_utf8_but_should_be_ported_to_utf16(), move(supported_elements))
     {
     }
 
@@ -66,6 +66,7 @@ static ReadonlySpan<NamedPropertyID> attribute_style_properties()
         NamedPropertyID(CSS::PropertyID::ClipRule),
         NamedPropertyID(CSS::PropertyID::Color),
         NamedPropertyID(CSS::PropertyID::ColorInterpolation),
+        NamedPropertyID(CSS::PropertyID::ColorInterpolationFilters),
         NamedPropertyID(CSS::PropertyID::Cursor),
         NamedPropertyID(CSS::PropertyID::Cx, { SVG::TagNames::circle, SVG::TagNames::ellipse }),
         NamedPropertyID(CSS::PropertyID::Cy, { SVG::TagNames::circle, SVG::TagNames::ellipse }),

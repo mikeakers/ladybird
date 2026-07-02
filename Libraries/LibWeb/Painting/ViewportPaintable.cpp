@@ -9,7 +9,7 @@
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/Text.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Layout/ReplacedBox.h>
 #include <LibWeb/Layout/TextNode.h>
@@ -75,7 +75,7 @@ void ViewportPaintable::initialize_async_scrolling_metadata_recording(DisplayLis
         blocking_wheel_event_region_state.has_blocking_wheel_event_region_covering_viewport);
 }
 
-void ViewportPaintable::finalize_async_scrolling_metadata_recording(DisplayListRecordingContext& context, HTML::Navigable& navigable, Gfx::IntRect viewport_rect)
+void ViewportPaintable::finalize_async_scrolling_metadata_recording(DisplayListRecordingContext& context, HTML::LocalNavigable& navigable, Gfx::IntRect viewport_rect)
 {
     if (!context.is_recording_async_scrolling_metadata())
         return;
@@ -305,8 +305,10 @@ GC::Ptr<Selection::Selection> ViewportPaintable::selection() const
 
 void ViewportPaintable::reset_selection_states()
 {
-    for_each_in_inclusive_subtree([](auto& layout_node) {
-        layout_node.set_selection_state(SelectionState::None);
+    for_each_in_inclusive_subtree([](auto& paintable) {
+        paintable.set_selection_state(SelectionState::None);
+        if (auto* paintable_with_lines = as_if<PaintableWithLines>(paintable))
+            paintable_with_lines->reset_fragment_selection_states();
         return TraversalDecision::Continue;
     });
 }
@@ -319,9 +321,9 @@ void ViewportPaintable::recompute_selection_states(DOM::Range& range)
     auto set_selection_state_on_all_slices = [](DOM::Node& container, SelectionState state) {
         if (auto* text = as_if<DOM::Text>(container)) {
             Layout::TextOffsetMapping mapping { *text };
-            mapping.for_each_fragment([&](Layout::TextNode& slice) {
-                if (auto paintable = slice.first_paintable())
-                    paintable->set_selection_state(state);
+            mapping.for_each_paintable_fragment([&](PaintableFragment& fragment) {
+                fragment.set_selection_state(state);
+                return TraversalDecision::Continue;
             });
             return;
         }

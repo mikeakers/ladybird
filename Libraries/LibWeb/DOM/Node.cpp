@@ -58,7 +58,7 @@
 #include <LibWeb/HTML/HTMLStyleElement.h>
 #include <LibWeb/HTML/HTMLTableElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/Scripting/SimilarOriginWindowAgent.h>
@@ -413,7 +413,7 @@ WebIDL::ExceptionOr<void> Node::set_node_value(Optional<String> const& maybe_val
 }
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#node-navigable
-GC::Ptr<HTML::Navigable> Node::navigable() const
+GC::Ptr<HTML::LocalNavigable> Node::navigable() const
 {
     // To get the node navigable of a node node, return the navigable whose active document is node's node document,
     // or null if there is no such navigable.
@@ -2730,6 +2730,10 @@ void Node::clear_paintable()
 void Node::set_needs_repaint(InvalidateDisplayList should_invalidate_display_list)
 {
     if (auto* layout_node = unsafe_layout_node()) {
+        if (auto* text_node = as_if<Layout::TextNode>(*layout_node)) {
+            text_node->set_needs_repaint(should_invalidate_display_list);
+            return;
+        }
         for (auto& paintable : layout_node->paintables())
             paintable->set_needs_repaint(should_invalidate_display_list);
     }

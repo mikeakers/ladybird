@@ -25,10 +25,10 @@
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLMediaElement.h>
 #include <LibWeb/HTML/HTMLSelectElement.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/SelectedFile.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/Page/Page.h>
@@ -98,19 +98,19 @@ void Page::visit_edges(JS::Cell::Visitor& visitor)
     });
 }
 
-HTML::Navigable& Page::focused_navigable()
+HTML::LocalNavigable& Page::focused_navigable()
 {
     if (m_focused_navigable)
         return *m_focused_navigable;
     return top_level_traversable();
 }
 
-void Page::set_focused_navigable(Badge<EventHandler>, HTML::Navigable& navigable)
+void Page::set_focused_navigable(Badge<EventHandler>, HTML::LocalNavigable& navigable)
 {
     m_focused_navigable = navigable;
 }
 
-void Page::navigable_document_destroyed(Badge<DOM::Document>, HTML::Navigable& navigable)
+void Page::navigable_document_destroyed(Badge<DOM::Document>, HTML::LocalNavigable& navigable)
 {
     if (&navigable == m_focused_navigable.ptr())
         m_focused_navigable = nullptr;
@@ -158,7 +158,7 @@ void Page::load_html(StringView html, URL::URL const& url)
     response->header_list()->append({ "Content-Type"sv, "text/html"sv });
     response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, html_string.bytes()));
 
-    HTML::Navigable::NavigateParams params { .url = url,
+    HTML::LocalNavigable::NavigateParams params { .url = url,
         .source_document = *document,
         .response = response,
         .user_involvement = HTML::UserNavigationInvolvement::BrowserUI };
@@ -425,7 +425,7 @@ void Page::update_needs_beforeunload_check()
     client().page_did_change_needs_beforeunload_check(m_needs_beforeunload_check);
 }
 
-void Page::set_top_level_traversable(GC::Ref<HTML::TraversableNavigable> navigable)
+void Page::set_top_level_traversable(GC::Ref<HTML::LocalTraversableNavigable> navigable)
 {
     VERIFY(!m_top_level_traversable); // Replacement is not allowed!
     VERIFY(&navigable->page() == this);
@@ -448,7 +448,7 @@ HTML::BrowsingContext const& Page::top_level_browsing_context() const
     return *m_top_level_traversable->active_browsing_context();
 }
 
-GC::Ref<HTML::TraversableNavigable> Page::top_level_traversable() const
+GC::Ref<HTML::LocalTraversableNavigable> Page::top_level_traversable() const
 {
     return *m_top_level_traversable;
 }

@@ -51,12 +51,12 @@
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
-#include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/LocalNavigable.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/SelectedFile.h>
 #include <LibWeb/HTML/Storage.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WorkerAgentParent.h>
 #include <LibWeb/Infra/Strings.h>
@@ -304,6 +304,12 @@ void ConnectionFromClient::reload(u64 page_id)
 {
     if (auto page = this->page(page_id); page.has_value())
         page->page().reload();
+}
+
+void ConnectionFromClient::cancel_download(u64 page_id, u64 download_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->cancel_download(download_id);
 }
 
 void ConnectionFromClient::traverse_the_history_by_delta(u64 page_id, i32 delta)
@@ -850,7 +856,7 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, WebView::DOMNodePropert
 
         properties->for_each_property([&](auto property_id, auto& value) {
             serialized.set(
-                Web::CSS::string_from_property_id(property_id),
+                Web::CSS::string_from_property_id(property_id).to_utf16_string().to_utf8_but_should_be_ported_to_utf16(),
                 value.to_string(Web::CSS::SerializationMode::Normal));
         });
 
@@ -1355,7 +1361,7 @@ void ConnectionFromClient::clear_inspected_dom_node(u64 page_id)
     if (!page.has_value())
         return;
 
-    for (auto& navigable : Web::HTML::all_navigables()) {
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
         if (navigable->active_document() != nullptr) {
             navigable->active_document()->set_inspected_node(nullptr);
         }
@@ -1368,7 +1374,7 @@ void ConnectionFromClient::highlight_dom_node(u64 page_id, Web::UniqueNodeID nod
     if (!page.has_value())
         return;
 
-    for (auto& navigable : Web::HTML::all_navigables()) {
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
         if (navigable->active_document() != nullptr) {
             navigable->active_document()->set_highlighted_node(nullptr, {});
         }
@@ -1459,7 +1465,7 @@ void ConnectionFromClient::clear_flexbox_highlight(u64 page_id, Web::UniqueNodeI
         return;
     }
 
-    for (auto& navigable : Web::HTML::all_navigables()) {
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
         if (navigable->active_document())
             navigable->active_document()->clear_flexbox_highlighted_node(nullptr);
     }
@@ -1496,7 +1502,7 @@ void ConnectionFromClient::clear_grid_highlight(u64 page_id, Web::UniqueNodeID n
         return;
     }
 
-    for (auto& navigable : Web::HTML::all_navigables()) {
+    for (auto& navigable : Web::HTML::all_local_navigables()) {
         if (navigable->active_document())
             navigable->active_document()->clear_grid_highlighted_node(nullptr);
     }

@@ -52,6 +52,7 @@
 #include <LibWeb/HTML/HTMLFormElement.h>
 #include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/HTML/HTMLObjectElement.h>
+#include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/Location.h>
 #include <LibWeb/HTML/MessageEvent.h>
 #include <LibWeb/HTML/MessagePort.h>
@@ -65,7 +66,6 @@
 #include <LibWeb/HTML/Storage.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/HTML/TokenizedFeatures.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
@@ -508,7 +508,7 @@ WebIDL::ExceptionOr<GC::Ref<Storage>> Window::local_storage()
     GC::Ptr<StorageAPI::LocalStorageBottle> map;
     auto storage_key = StorageAPI::obtain_a_storage_key(relevant_settings_object(*this));
     if (storage_key.has_value()) {
-        map = StorageAPI::LocalStorageBottle::create(heap(), page(), storage_key.value(), StorageAPI::StorageEndpoint::LOCAL_STORAGE_QUOTA);
+        map = StorageAPI::LocalStorageBottle::create(heap(), page(), StorageAPI::StorageEndpointType::LocalStorage, storage_key.value(), StorageAPI::StorageEndpoint::LOCAL_STORAGE_QUOTA);
     }
 
     // 3. If map is failure, then throw a "SecurityError" DOMException.
@@ -609,7 +609,7 @@ void Window::consume_history_action_user_activation()
     auto top = navigable->top_level_traversable();
 
     // 3. Let navigables be the inclusive descendant navigables of top's active document.
-    auto navigables = top->active_document()->inclusive_descendant_navigables();
+    auto navigables = as<LocalTraversableNavigable>(*top).active_document()->inclusive_descendant_navigables();
 
     // 4. Let windows be the list of Window objects constructed by taking the active window of each item in navigables.
     GC::RootVector<GC::Ptr<Window>> windows;
@@ -634,7 +634,7 @@ void Window::consume_user_activation()
     auto top = navigable->top_level_traversable();
 
     // 3. Let navigables be the inclusive descendant navigables of top's active document.
-    auto navigables = top->active_document()->inclusive_descendant_navigables();
+    auto navigables = as<LocalTraversableNavigable>(*top).active_document()->inclusive_descendant_navigables();
 
     // 4. Let windows be the list of Window objects constructed by taking the active window of each item in navigables.
     GC::RootVector<GC::Ptr<Window>> windows;
@@ -725,7 +725,7 @@ BrowsingContext* Window::browsing_context()
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#window-navigable
-GC::Ptr<Navigable> Window::navigable() const
+GC::Ptr<LocalNavigable> Window::navigable() const
 {
     // A Window's navigable is the navigable whose active document is the Window's associated Document's, or null if there is no such navigable.
     return m_associated_document->navigable();
@@ -913,7 +913,7 @@ void Window::close()
 
         // 2. Queue a task on the DOM manipulation task source to definitely close thisTraversable.
         HTML::queue_global_task(HTML::Task::Source::DOMManipulation, incumbent_global_object, GC::create_function(heap(), [traversable] {
-            as<TraversableNavigable>(*traversable).definitely_close_top_level_traversable();
+            as<LocalTraversableNavigable>(*traversable).definitely_close_top_level_traversable();
         }));
     }
 }
@@ -1118,7 +1118,7 @@ WebIDL::ExceptionOr<void> Window::set_opener(JS::Value value)
 GC::Ptr<WindowProxy const> Window::parent() const
 {
     // 1. Let navigable be this's navigable.
-    auto navigable = this->navigable();
+    GC::Ptr<Navigable> navigable = this->navigable();
 
     // 2. If navigable is null, then return null.
     if (!navigable)
@@ -1865,7 +1865,7 @@ GC::Ref<CustomElementRegistry> Window::custom_elements()
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#document-tree-child-navigable-target-name-property-set
-OrderedHashMap<FlyString, GC::Ref<Navigable>> Window::document_tree_child_navigable_target_name_property_set()
+OrderedHashMap<FlyString, GC::Ref<LocalNavigable>> Window::document_tree_child_navigable_target_name_property_set()
 {
     // The document-tree child navigable target name property set of a Window object window is the return value of running these steps:
 
@@ -1873,7 +1873,7 @@ OrderedHashMap<FlyString, GC::Ref<Navigable>> Window::document_tree_child_naviga
     auto children = associated_document().document_tree_child_navigables();
 
     // 2. Let firstNamedChildren be an empty ordered set.
-    OrderedHashMap<FlyString, GC::Ref<Navigable>> first_named_children;
+    OrderedHashMap<FlyString, GC::Ref<LocalNavigable>> first_named_children;
 
     // 3. For each navigable of children:
     for (auto const& navigable : children) {
@@ -1893,7 +1893,7 @@ OrderedHashMap<FlyString, GC::Ref<Navigable>> Window::document_tree_child_naviga
     }
 
     // 4. Let names be an empty ordered set.
-    OrderedHashMap<FlyString, GC::Ref<Navigable>> names;
+    OrderedHashMap<FlyString, GC::Ref<LocalNavigable>> names;
 
     // 5. For each navigable of firstNamedChildren:
     for (auto const& [name, navigable] : first_named_children) {

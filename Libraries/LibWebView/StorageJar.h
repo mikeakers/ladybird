@@ -33,6 +33,8 @@ class WEBVIEW_API StorageJar {
     AK_MAKE_NONMOVABLE(StorageJar);
 
 public:
+    static ErrorOr<Database::MigrationOutcome> migrate_schema(Database::Database&, Database::MigrationMode = Database::MigrationMode::Apply);
+
     static ErrorOr<NonnullOwnPtr<StorageJar>> create(Database::Database&);
     static NonnullOwnPtr<StorageJar> create();
 
@@ -44,6 +46,7 @@ public:
     void remove_items_accessed_since(UnixDateTime);
     void clear_storage_key(StorageEndpointType storage_endpoint, String const& storage_key);
     Vector<String> get_all_keys(StorageEndpointType storage_endpoint, String const& storage_key);
+    u64 usage(String const& storage_key);
     Requests::CacheSizes estimate_storage_size_accessed_since(UnixDateTime since) const;
 
 private:
@@ -55,7 +58,8 @@ private:
         Database::StatementID update_last_access_time { 0 };
         Database::StatementID clear { 0 };
         Database::StatementID get_keys { 0 };
-        Database::StatementID calculate_size_excluding_key { 0 };
+        Database::StatementID calculate_size_excluding_bottle_key { 0 };
+        Database::StatementID calculate_size { 0 };
         Database::StatementID estimate_storage_size_accessed_since { 0 };
     };
 
@@ -67,6 +71,7 @@ private:
         void delete_items_accessed_since(UnixDateTime);
         void clear(StorageEndpointType storage_endpoint, String const& storage_key);
         Vector<String> get_keys(StorageEndpointType storage_endpoint, String const& storage_key);
+        u64 usage(String const& storage_key);
         Requests::CacheSizes estimate_storage_size_accessed_since(UnixDateTime since) const;
 
     private:
@@ -85,6 +90,7 @@ private:
         void delete_items_accessed_since(UnixDateTime);
         void clear(StorageEndpointType storage_endpoint, String const& storage_key);
         Vector<String> get_keys(StorageEndpointType storage_endpoint, String const& storage_key);
+        u64 usage(String const& storage_key);
         Requests::CacheSizes estimate_storage_size_accessed_since(UnixDateTime since) const;
 
         Database::Database& database;
@@ -92,8 +98,6 @@ private:
     };
 
     explicit StorageJar(Optional<PersistedStorage>);
-
-    static ErrorOr<void> upgrade_database(Database::Database&, u32 current_version);
 
     Optional<PersistedStorage> m_persisted_storage;
     TransientStorage m_transient_storage;
