@@ -147,7 +147,7 @@ struct LayoutState {
 
         NodeWithStyle const& node() const { return *m_node; }
         NodeWithStyle& node() { return const_cast<NodeWithStyle&>(*m_node); }
-        void set_node(NodeWithStyle const&, UsedValues const* containing_block_used_values);
+        void set_node(NodeWithStyle const&, UsedValues const* containing_block_used_values, Optional<CSSPixels> percentage_basis_width = {}, Optional<CSSPixels> percentage_basis_height = {});
 
         UsedValues const* containing_block_used_values() const { return m_containing_block_used_values; }
 
@@ -320,13 +320,6 @@ struct LayoutState {
             return move(m_rare->flex_layout_data);
         }
 
-        void set_grid_area_size(CSSPixelSize grid_area_size) { ensure_rare_data().grid_area_size = grid_area_size; }
-        Optional<CSSPixelSize> const& grid_area_size() const
-        {
-            static Optional<CSSPixelSize> const empty;
-            return m_rare ? m_rare->grid_area_size : empty;
-        }
-
         void set_static_position_rect(StaticPositionRect const& static_position_rect) { ensure_rare_data().static_position_rect = static_position_rect; }
         CSSPixelPoint static_position() const
         {
@@ -358,7 +351,6 @@ struct LayoutState {
                 , computed_svg_path(other.computed_svg_path)
                 , grid_template_columns(other.grid_template_columns)
                 , grid_template_rows(other.grid_template_rows)
-                , grid_area_size(other.grid_area_size)
                 , override_borders_data(other.override_borders_data)
                 , computed_svg_transforms(other.computed_svg_transforms)
                 , static_position_rect(other.static_position_rect)
@@ -376,7 +368,6 @@ struct LayoutState {
             OwnPtr<FlexLayoutData> flex_layout_data;
             RefPtr<CSS::GridTrackSizeListStyleValue const> grid_template_columns;
             RefPtr<CSS::GridTrackSizeListStyleValue const> grid_template_rows;
-            Optional<CSSPixelSize> grid_area_size;
             Optional<Painting::PaintableBox::BordersDataWithElementKind> override_borders_data;
             Optional<Painting::SVGGraphicsPaintable::ComputedTransforms> computed_svg_transforms;
             Optional<StaticPositionRect> static_position_rect;
@@ -418,12 +409,16 @@ struct LayoutState {
     UsedValues& get_mutable(NodeWithStyle const&);
     UsedValues const& get(NodeWithStyle const&) const;
 
+    UsedValues& create(NodeWithStyle const&, Optional<CSSPixels> percentage_basis_width, Optional<CSSPixels> percentage_basis_height);
+
     UsedValues& populate_from_paintable(NodeWithStyle const&, Painting::PaintableBox const&);
     UsedValues& populate_node_from(LayoutState const& source, NodeWithStyle const& node);
 
     UsedValues const* try_get(NodeWithStyle const&) const;
     UsedValues* try_get_mutable(NodeWithStyle const&);
     UsedValues const* try_get(Node const&) const;
+
+    bool has_subtree_root() const { return m_subtree_root != nullptr; }
 
 private:
     UsedValues& ensure_used_values_for(NodeWithStyle const&);
