@@ -48,7 +48,7 @@
 #include <LibWeb/Painting/DisplayListResourceStorage.h>
 #include <LibWeb/Painting/HitTestDisplayList.h>
 #include <LibWeb/Painting/NavigableContainerViewportPaintable.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/Selection/Selection.h>
 #include <LibWeb/UIEvents/EventNames.h>
@@ -232,18 +232,25 @@ EventResult EventHandler::handle_mousedown(CSSPixelPoint visual_viewport_positio
     m_mousedown_visual_viewport_position = visual_viewport_position;
 
     auto coordinates = compute_mouse_event_coordinates(visual_viewport_position, viewport_position, *paintable, *layout_node);
-    if (!dispatch_a_pointer_event_for_a_device_that_supports_hover(PointerEventType::PointerDown, *node, chrome_widget, coordinates, screen_position, {}, button, buttons, modifiers, click_count))
-        return EventResult::Cancelled;
+    auto dispatch_result = dispatch_a_pointer_event_for_a_device_that_supports_hover(PointerEventType::PointerDown, *node, chrome_widget, coordinates, screen_position, {}, button, buttons, modifiers, click_count);
+
+    bool is_context_menu_trigger = button == UIEvents::MouseButton::Secondary;
+#if defined(AK_OS_MACOS)
+    is_context_menu_trigger |= button == UIEvents::MouseButton::Primary && (modifiers & UIEvents::KeyModifier::Mod_Ctrl) != 0;
+#endif
 
     // FIXME: The spec allows this to be fired following mousedown or mouseup. The native behavior on Windows is to
     //        do so in mouseup, so we should make this configurable by the UI.
-    if (button == UIEvents::MouseButton::Secondary)
+    // NB: The contextmenu event is dispatched even if the page cancelled the pointerdown or mousedown event,
+    //     matching other engines. The page can still suppress the native context menu by cancelling the
+    //     contextmenu event itself.
+    if (is_context_menu_trigger && dispatch_result != PointerEventDispatchResult::SwallowedByChromeWidget)
         maybe_show_context_menu(*node, coordinates, screen_position, viewport_position, buttons, modifiers);
-#if defined(AK_OS_MACOS)
-    else if (button == UIEvents::MouseButton::Primary && (modifiers & UIEvents::KeyModifier::Mod_Ctrl) != 0)
-        maybe_show_context_menu(*node, coordinates, screen_position, viewport_position, buttons, modifiers);
-#endif
-    else
+
+    if (dispatch_result != PointerEventDispatchResult::RunDefaultActions)
+        return EventResult::Cancelled;
+
+    if (!is_context_menu_trigger)
         m_mousedown_target_is_drag_candidate = button == UIEvents::MouseButton::Primary;
 
     // NB: Dispatching an event may have disturbed the world.
@@ -388,7 +395,7 @@ EventResult EventHandler::handle_mousemove(CSSPixelPoint visual_viewport_positio
             auto movement = compute_mouse_event_movement(screen_position);
             m_mousemove_previous_screen_position = screen_position;
 
-            if (!dispatch_a_pointer_event_for_a_device_that_supports_hover(PointerEventType::PointerMove, *node, chrome_widget, coordinates, screen_position, movement, UIEvents::MouseButton::Primary, buttons, modifiers))
+            if (dispatch_a_pointer_event_for_a_device_that_supports_hover(PointerEventType::PointerMove, *node, chrome_widget, coordinates, screen_position, movement, UIEvents::MouseButton::Primary, buttons, modifiers) != PointerEventDispatchResult::RunDefaultActions)
                 return EventResult::Cancelled;
         }
     } else if (m_mousedown_target) {
@@ -399,7 +406,7 @@ EventResult EventHandler::handle_mousemove(CSSPixelPoint visual_viewport_positio
         auto movement = compute_mouse_event_movement(screen_position);
         m_mousemove_previous_screen_position = screen_position;
 
-        if (!dispatch_a_pointer_event_for_a_device_that_supports_hover(PointerEventType::PointerMove, document->html_element(), nullptr, coordinates, screen_position, movement, UIEvents::MouseButton::Primary, buttons, modifiers))
+        if (dispatch_a_pointer_event_for_a_device_that_supports_hover(PointerEventType::PointerMove, document->html_element(), nullptr, coordinates, screen_position, movement, UIEvents::MouseButton::Primary, buttons, modifiers) != PointerEventDispatchResult::RunDefaultActions)
             return EventResult::Cancelled;
     }
 
@@ -545,11 +552,7 @@ static CSSPixelPoint compute_mouse_event_offset(CSSPixelPoint position, Painting
     // return the x-coordinate of the position where the event occurred,
     // ignoring the transforms that apply to the element and its ancestors,
     CSSPixelPoint offset_position = position;
-    if (auto const* paintable_box = as_if<Painting::PaintableBox>(paintable)) {
-        offset_position = paintable_box->inverse_transform_point(position);
-    } else if (auto containing_block = paintable.containing_block()) {
-        offset_position = containing_block->inverse_transform_point(position);
-    }
+    offset_position = paintable.inverse_transform_point(position);
 
     // relative to the origin of the padding edge of the target node
     auto const top_left_of_layout_node = paintable.box_type_agnostic_position();
@@ -654,8 +657,8 @@ EventResult EventHandler::handle_mousewheel(CSSPixelPoint visual_viewport_positi
                 || (wheel_delta_x > 0 && visual_viewport->offset_left() < visual_viewport_max_x);
             auto visual_viewport_can_scroll_vertically = (wheel_delta_y < 0 && visual_viewport->offset_top() > 0)
                 || (wheel_delta_y > 0 && visual_viewport->offset_top() < visual_viewport_max_y);
-            auto viewport_wheel_delta_x = document->paintable_box()->could_be_scrolled_by_wheel_event(Painting::PaintableBox::ScrollDirection::Horizontal) || visual_viewport_can_scroll_horizontally ? wheel_delta_x : 0;
-            auto viewport_wheel_delta_y = document->paintable_box()->could_be_scrolled_by_wheel_event(Painting::PaintableBox::ScrollDirection::Vertical) || visual_viewport_can_scroll_vertically ? wheel_delta_y : 0;
+            auto viewport_wheel_delta_x = document->paintable_box()->could_be_scrolled_by_wheel_event(Painting::Paintable::ScrollDirection::Horizontal) || visual_viewport_can_scroll_horizontally ? wheel_delta_x : 0;
+            auto viewport_wheel_delta_y = document->paintable_box()->could_be_scrolled_by_wheel_event(Painting::Paintable::ScrollDirection::Vertical) || visual_viewport_can_scroll_vertically ? wheel_delta_y : 0;
 
             if (viewport_wheel_delta_x != 0 || viewport_wheel_delta_y != 0) {
                 auto viewport_scroll_position_before = CSSPixelPoint { CSSPixels(document->visual_viewport()->page_left()), CSSPixels(document->visual_viewport()->page_top()) };
@@ -2266,7 +2269,7 @@ static void set_node_and_ancestors_being_activated(DOM::Node* node, bool activat
 }
 
 // https://w3c.github.io/pointerevents/#mapping-for-devices-that-support-hover
-bool EventHandler::dispatch_a_pointer_event_for_a_device_that_supports_hover(PointerEventType type, GC::Ptr<DOM::Node> node, RefPtr<Painting::ChromeWidget> chrome_widget, MouseEventCoordinates const& coordinates, CSSPixelPoint screen_position, CSSPixelPoint movement, unsigned button, unsigned buttons, unsigned modifiers, int click_count)
+EventHandler::PointerEventDispatchResult EventHandler::dispatch_a_pointer_event_for_a_device_that_supports_hover(PointerEventType type, GC::Ptr<DOM::Node> node, RefPtr<Painting::ChromeWidget> chrome_widget, MouseEventCoordinates const& coordinates, CSSPixelPoint screen_position, CSSPixelPoint movement, unsigned button, unsigned buttons, unsigned modifiers, int click_count)
 {
     auto& document = *m_navigable->active_document();
     auto& realm = document.realm();
@@ -2318,7 +2321,7 @@ bool EventHandler::dispatch_a_pointer_event_for_a_device_that_supports_hover(Poi
     if (chrome_widget || m_captured_chrome_widget)
         document.update_layout(DOM::UpdateLayoutReason::EventHandlerDispatchChromeWidgetEvent);
     if (!dispatch_chrome_widget_pointer_event(chrome_widget, pointer_event_name, button, coordinates.visual_viewport_position))
-        return false;
+        return PointerEventDispatchResult::SwallowedByChromeWidget;
 
     // FIXME: This will be moved to the click event and need to track the targets of the pointerdown and pointerup events.
     //        https://github.com/w3c/pointerevents/pull/460
@@ -2362,7 +2365,7 @@ bool EventHandler::dispatch_a_pointer_event_for_a_device_that_supports_hover(Poi
     if (type == PointerEventType::PointerUp || type == PointerEventType::PointerCancel)
         m_prevent_mouse_event = false;
 
-    return run_default_activation_behavior;
+    return run_default_activation_behavior ? PointerEventDispatchResult::RunDefaultActions : PointerEventDispatchResult::CancelledByPage;
 }
 
 void EventHandler::track_the_effective_position_of_the_legacy_mouse_pointer(GC::Ptr<DOM::Node> target, Optional<DOM::HoverEventData> hover_event_data)
@@ -2577,14 +2580,14 @@ void EventHandler::update_cursor(RefPtr<Painting::Paintable> paintable, GC::Ptr<
     set_page_cursor(m_navigable->page(), cursor);
 }
 
-RefPtr<Painting::PaintableBox> EventHandler::paint_root()
+RefPtr<Painting::Paintable> EventHandler::paint_root()
 {
     if (!m_navigable->active_document())
         return nullptr;
     return m_navigable->active_document()->paintable_box();
 }
 
-RefPtr<Painting::PaintableBox const> EventHandler::paint_root() const
+RefPtr<Painting::Paintable const> EventHandler::paint_root() const
 {
     if (!m_navigable->active_document())
         return nullptr;

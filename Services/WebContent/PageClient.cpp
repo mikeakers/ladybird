@@ -43,7 +43,7 @@
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/InvalidateDisplayList.h>
 #include <LibWeb/Layout/Viewport.h>
-#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/Streams/ReadableStreamDefaultReader.h>
 #include <LibWeb/WebIDL/Promise.h>
 #include <LibWebView/SiteIsolation.h>
@@ -339,6 +339,33 @@ void PageClient::compositor_process_reconnected()
 Queue<Web::QueuedInputEvent>& PageClient::input_event_queue()
 {
     return client().input_event_queue();
+}
+
+void PageClient::did_handle_input_event(u64 page_id, Web::InputEvent const& event)
+{
+    auto should_update_input_method_state = event.visit(
+        [](Web::KeyEvent const&) {
+            return true;
+        },
+        [](Web::MouseEvent const& mouse_event) {
+            switch (mouse_event.type) {
+            case Web::MouseEvent::Type::MouseDown:
+            case Web::MouseEvent::Type::MouseUp:
+                return true;
+            case Web::MouseEvent::Type::MouseMove:
+                return mouse_event.buttons != Web::UIEvents::MouseButton::None;
+            case Web::MouseEvent::Type::MouseLeave:
+            case Web::MouseEvent::Type::MouseWheel:
+                return false;
+            }
+            VERIFY_NOT_REACHED();
+        },
+        [](auto const&) {
+            return false;
+        });
+
+    if (should_update_input_method_state)
+        client().update_input_method_state(page_id);
 }
 
 void PageClient::report_finished_handling_input_event(u64 page_id, Web::EventResult event_was_handled)
